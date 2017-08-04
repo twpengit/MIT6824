@@ -1,11 +1,14 @@
 package mapreduce
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"io"
+	"io/ioutil"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 // doMap does the job of a map worker: it reads one of the input files
@@ -46,24 +49,13 @@ func doMap(
 	// Remember to close the file after you have written all the values!
 
 	// 1. Read content out from input file
-	file, err := os.Open(inFile)
-	defer file.Close()
-
+	buf, err := ioutil.ReadFile(inFile)
 	if err != nil {
-		fmt.Printf("Read %s error %v\n", inFile, err)
-		os.Exit(-1)
+		fmt.Printf("Fail to read from input file %s, error is %s", inFile, err)
+		return
 	}
 
-	reader := bufio.NewReader(file)
-	var strContent string
-	for {
-		tempString, err := reader.ReadString('\n')
-		if err == io.EOF {
-			break
-		} else {
-			strContent += tempString
-		}
-	}
+	strContent := string(buf)
 
 	// 2. Call customer map function
 	keyValue := mapF(inFile, strContent)
@@ -73,20 +65,40 @@ func doMap(
 	}
 
 	// 3. Partition and write into intermedia file
-	var outputFileMap map[uint32]string
+	var outputFileMap map[uint32][]KeyValue
 
 	for _, item := range keyValue {
 		index := ihash(item.Key)
 		index = index % uint32(nReduce)
 
-		outputFileMap[index] = ""
+		outputFileMap[index] = append(outputFileMap[index], item)
 	}
 
-	for index, content := range outputFileMap {
-		index = index
-		content = content
-		// write to intermedia file
+	for index, kv := range outputFileMap {
+		writeToIntermediaFile(jobName, mapTaskNumber, index, kv)
 	}
+}
+
+func writeToIntermediaFile(jobName string, // the name of the MapReduce job
+	// Generate file name
+	mapTaskNumber int, reduceIndex uint32, content []KeyValue) {
+	file, _ := exec.LookPath(os.Args[0])
+	path, _ := filepath.Abs(file)
+	index := strings.LastIndex(path, string(os.PathSeparator))
+	folderPath := path[:index]
+
+	fileName := fmt.Sprintf("%s%s%s_%s_%s", folderPath, string(os.PathSeparator), jobName, mapTaskNumber, reduceIndex)
+
+	// Encode to json file
+	outputFile, err := os.Create(fileName)
+	if err != nil {
+		fmt.Printf("Fail to create output file %s, error is %s", fileName, err)
+		return
+	}
+	defer outputFile.Close()
+
+	outputEncoder := json.NewEncoder(outputFile)
+	outputEncoder.Encode(content)
 }
 
 func ihash(s string) uint32 {

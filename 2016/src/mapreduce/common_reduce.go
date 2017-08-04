@@ -1,5 +1,14 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
 // doReduce does the job of a reduce worker: it reads the intermediate
 // key/value pairs (produced by the map phase) for this task, sorts the
 // intermediate key/value pairs by key, calls the user-defined reduce function
@@ -31,4 +40,32 @@ func doReduce(
 	// 	enc.Encode(KeyValue{key, reduceF(...)})
 	// }
 	// file.Close()
+
+	// 1. Iterate all the intermedia files that from all the map tasks and belong to this reduce task
+	intermediaRes := make([]KeyValue, 100)
+	reduceRes := make([]KeyValue, 100)
+
+	for i := 0; i < nMap; i++ {
+		intermediaRes = intermediaRes[:0]
+		file, _ := exec.LookPath(os.Args[0])
+		path, _ := filepath.Abs(file)
+		index := strings.LastIndex(path, string(os.PathSeparator))
+		folderPath := path[:index]
+
+		fileName := fmt.Sprintf("%s%s%s_%s_%s", folderPath, string(os.PathSeparator), jobName, i, reduceTaskNumber)
+
+		intermediaFile, err := os.Open(fileName)
+		if err != nil {
+			fmt.Printf("Fail to open intermedia file %s, error is %s", fileName, err)
+			continue
+		}
+		defer intermediaFile.Close()
+
+		intermediaDecoder := json.NewDecoder(intermediaFile)
+		intermediaDecoder.Decode(intermediaRes)
+		reduceRes = append(reduceRes, intermediaRes...)
+	}
+
+	// 2. Sort result by key
+
 }
