@@ -68,4 +68,7 @@ func doReduce(
 
 	// 2. Sort result by key
 
+	// 3. Iterate items grouped by key, reduce items by calling reduceF func(key string, values []string) string
+
+	// 4. Foreach key, reduced string write to output file
 }
