@@ -65,11 +65,15 @@ func doMap(
 	}
 
 	// 3. Partition and write into intermedia file
-	var outputFileMap map[uint32][]KeyValue
+	outputFileMap := make(map[uint32][]KeyValue, 0)
 
 	for _, item := range keyValue {
 		index := ihash(item.Key)
 		index = index % uint32(nReduce)
+
+		if outputFileMap[index] == nil {
+			outputFileMap[index] = make([]KeyValue, 0)
+		}
 
 		outputFileMap[index] = append(outputFileMap[index], item)
 	}
@@ -86,13 +90,14 @@ func writeToIntermediaFile(jobName string, // the name of the MapReduce job
 	path, _ := filepath.Abs(file)
 	index := strings.LastIndex(path, string(os.PathSeparator))
 	folderPath := path[:index]
+	fileName := reduceName(jobName, mapTaskNumber, int(reduceIndex))
 
-	fileName := fmt.Sprintf("%s%s%s_%s_%s", folderPath, string(os.PathSeparator), jobName, mapTaskNumber, reduceIndex)
+	filePath := fmt.Sprintf("%s%s%s", folderPath, string(os.PathSeparator), fileName)
 
 	// Encode to json file
 	outputFile, err := os.Create(fileName)
 	if err != nil {
-		fmt.Printf("Fail to create output file %s, error is %s", fileName, err)
+		fmt.Printf("Fail to create output file %s, error is %s", filePath, err)
 		return
 	}
 	defer outputFile.Close()

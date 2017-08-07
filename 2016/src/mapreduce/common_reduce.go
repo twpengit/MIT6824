@@ -43,8 +43,8 @@ func doReduce(
 	// file.Close()
 
 	// 1. Iterate all the intermedia files that from all the map tasks and belong to this reduce task
-	intermediaRes := make([]KeyValue, 100)
-	reduceRes := make([]KeyValue, 100)
+	intermediaRes := make([]KeyValue, 0)
+	reduceRes := make([]KeyValue, 0)
 
 	for i := 0; i < nMap; i++ {
 		intermediaRes = intermediaRes[:0]
@@ -52,19 +52,29 @@ func doReduce(
 		path, _ := filepath.Abs(file)
 		index := strings.LastIndex(path, string(os.PathSeparator))
 		folderPath := path[:index]
+		fileName := reduceName(jobName, i, reduceTaskNumber)
 
-		fileName := fmt.Sprintf("%s%s%s_%s_%s", folderPath, string(os.PathSeparator), jobName, i, reduceTaskNumber)
+		filePath := fmt.Sprintf("%s%s%s", folderPath, string(os.PathSeparator), fileName)
 
 		intermediaFile, err := os.Open(fileName)
 		if err != nil {
-			fmt.Printf("Fail to open intermedia file %s, error is %s", fileName, err)
+			fmt.Printf("Fail to open intermedia file %s, error is %s", filePath, err)
 			continue
 		}
 		defer intermediaFile.Close()
 
 		intermediaDecoder := json.NewDecoder(intermediaFile)
-		intermediaDecoder.Decode(intermediaRes)
-		reduceRes = append(reduceRes, intermediaRes...)
+		_, err = intermediaDecoder.Token()
+		for intermediaDecoder.More() {
+			var m KeyValue
+			err := intermediaDecoder.Decode(&m)
+			if err != nil {
+				continue
+			} else {
+				reduceRes = append(reduceRes, m)
+			}
+		}
+		_, err = intermediaDecoder.Token()
 	}
 
 	// 2. Sort result by key
@@ -74,7 +84,7 @@ func doReduce(
 
 	// 3. Iterate items grouped by key, reduce items by calling reduceF func(key string, values []string) string
 	var latestKey string
-	latestValues := make([]string, 100)
+	latestValues := make([]string, 0)
 	for _, item := range sortedReduceRes {
 		if latestKey == "" {
 			// the first item
@@ -104,12 +114,13 @@ func writeToOutputFile(jobName string, reduceTaskNumber int, key, values string)
 	path, _ := filepath.Abs(file)
 	index := strings.LastIndex(path, string(os.PathSeparator))
 	folderPath := path[:index]
+	fileName := mergeName(jobName, reduceTaskNumber)
 
-	fileName := fmt.Sprintf("%s%s_%s_%s", folderPath, string(os.PathSeparator), jobName, reduceTaskNumber)
+	filePath := fmt.Sprintf("%s%s%s", folderPath, string(os.PathSeparator), fileName)
 
 	outputFile, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND, os.ModePerm)
 	if err != nil {
-		fmt.Printf("Fail to open output file %s, error is %s", fileName, err)
+		fmt.Printf("Fail to open output file %s, error is %s", filePath, err)
 		return
 	}
 	defer outputFile.Close()

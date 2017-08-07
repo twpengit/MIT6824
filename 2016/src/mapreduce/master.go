@@ -27,6 +27,14 @@ type Master struct {
 	stats    []int
 }
 
+func (mr *Master) Files() []string {
+	return mr.files
+}
+
+func (mr *Master) Stats() []int {
+	return mr.stats
+}
+
 // Register is an RPC method that is called by workers after they have started
 // up to report that they are ready to receive tasks.
 func (mr *Master) Register(args *RegisterArgs, _ *struct{}) error {
