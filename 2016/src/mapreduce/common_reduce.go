@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -67,8 +68,66 @@ func doReduce(
 	}
 
 	// 2. Sort result by key
+	var sortedReduceRes KeyValueSlice
+	sortedReduceRes = reduceRes[0:len(reduceRes)]
+	sort.Sort(sortedReduceRes)
 
 	// 3. Iterate items grouped by key, reduce items by calling reduceF func(key string, values []string) string
+	var latestKey string
+	latestValues := make([]string, 100)
+	for _, item := range sortedReduceRes {
+		if latestKey == "" {
+			// the first item
+			latestKey = item.Key
+			latestValues = append(latestValues, item.Value)
+		} else if latestKey != item.Key {
+			// encode values in file first
+			writeToOutputFile(jobName, reduceTaskNumber, latestKey, reduceF(latestKey, latestValues))
 
-	// 4. Foreach key, reduced string write to output file
+			// change latestKey to the new key and clear last values
+			latestKey = item.Key
+			latestValues = latestValues[:0]
+		} else {
+			// latestKey == item.Key, items for the same key
+			latestValues = append(latestValues, item.Value)
+		}
+	}
+
+	// encode last key, values to output file
+	if latestKey != "" {
+		writeToOutputFile(jobName, reduceTaskNumber, latestKey, reduceF(latestKey, latestValues))
+	}
+}
+
+func writeToOutputFile(jobName string, reduceTaskNumber int, key, values string) {
+	file, _ := exec.LookPath(os.Args[0])
+	path, _ := filepath.Abs(file)
+	index := strings.LastIndex(path, string(os.PathSeparator))
+	folderPath := path[:index]
+
+	fileName := fmt.Sprintf("%s%s_%s_%s", folderPath, string(os.PathSeparator), jobName, reduceTaskNumber)
+
+	outputFile, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND, os.ModePerm)
+	if err != nil {
+		fmt.Printf("Fail to open output file %s, error is %s", fileName, err)
+		return
+	}
+	defer outputFile.Close()
+
+	intermediaEncoder := json.NewEncoder(outputFile)
+	intermediaEncoder.Encode(KeyValue{key, values})
+}
+
+type KeyValueSlice []KeyValue
+
+func (kvs KeyValueSlice) Len() int {
+	return len(kvs)
+}
+
+func (kvs KeyValueSlice) Swap(i, j int) {
+	kvs[i], kvs[j] = kvs[j], kvs[i]
+}
+
+func (kvs KeyValueSlice) Less(i, j int) bool {
+	return kvs[i].Key < kvs[j].Key
 }
