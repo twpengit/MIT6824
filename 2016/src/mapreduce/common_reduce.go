@@ -4,10 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
-	"strings"
 )
 
 // doReduce does the job of a reduce worker: it reads the intermediate
@@ -48,17 +45,11 @@ func doReduce(
 
 	for i := 0; i < nMap; i++ {
 		intermediaRes = intermediaRes[:0]
-		file, _ := exec.LookPath(os.Args[0])
-		path, _ := filepath.Abs(file)
-		index := strings.LastIndex(path, string(os.PathSeparator))
-		folderPath := path[:index]
 		fileName := reduceName(jobName, i, reduceTaskNumber)
-
-		filePath := fmt.Sprintf("%s%s%s", folderPath, string(os.PathSeparator), fileName)
 
 		intermediaFile, err := os.Open(fileName)
 		if err != nil {
-			fmt.Printf("Fail to open intermedia file %s, error is %s", filePath, err)
+			fmt.Printf("Fail to open intermedia file %s, error is %s", fileName, err)
 			continue
 		}
 		defer intermediaFile.Close()
@@ -110,17 +101,11 @@ func doReduce(
 }
 
 func writeToOutputFile(jobName string, reduceTaskNumber int, key, values string) {
-	file, _ := exec.LookPath(os.Args[0])
-	path, _ := filepath.Abs(file)
-	index := strings.LastIndex(path, string(os.PathSeparator))
-	folderPath := path[:index]
 	fileName := mergeName(jobName, reduceTaskNumber)
-
-	filePath := fmt.Sprintf("%s%s%s", folderPath, string(os.PathSeparator), fileName)
 
 	outputFile, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND, os.ModePerm)
 	if err != nil {
-		fmt.Printf("Fail to open output file %s, error is %s", filePath, err)
+		fmt.Printf("Fail to open output file %s, error is %s", fileName, err)
 		return
 	}
 	defer outputFile.Close()

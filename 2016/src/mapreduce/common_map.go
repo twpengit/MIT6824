@@ -6,9 +6,6 @@ import (
 	"hash/fnv"
 	"io/ioutil"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 )
 
 // doMap does the job of a map worker: it reads one of the input files
@@ -86,18 +83,12 @@ func doMap(
 func writeToIntermediaFile(jobName string, // the name of the MapReduce job
 	// Generate file name
 	mapTaskNumber int, reduceIndex uint32, content []KeyValue) {
-	file, _ := exec.LookPath(os.Args[0])
-	path, _ := filepath.Abs(file)
-	index := strings.LastIndex(path, string(os.PathSeparator))
-	folderPath := path[:index]
 	fileName := reduceName(jobName, mapTaskNumber, int(reduceIndex))
-
-	filePath := fmt.Sprintf("%s%s%s", folderPath, string(os.PathSeparator), fileName)
 
 	// Encode to json file
 	outputFile, err := os.Create(fileName)
 	if err != nil {
-		fmt.Printf("Fail to create output file %s, error is %s", filePath, err)
+		fmt.Printf("Fail to create output file %s, error is %s", fileName, err)
 		return
 	}
 	defer outputFile.Close()
