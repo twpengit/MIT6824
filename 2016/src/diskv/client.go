@@ -24,7 +24,7 @@ func nrand() int64 {
 
 func MakeClerk(shardmasters []string) *Clerk {
 	ck := new(Clerk)
-	ck.sm = shardmaster.MakeClerk(shardmasters)
+	//ck.sm = shardmaster.MakeClerk(shardmasters)
 	// You'll have to modify MakeClerk.
 	return ck
 }
