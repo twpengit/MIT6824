@@ -182,6 +182,8 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 				// a word generated
 				word := string(runeSlice[startIndex:i])
 				res = append(res, mapreduce.KeyValue{word, "1"})
+				letterIdentified = false
+				startIndex = i + 1
 			} else {
 				letterIdentified = false
 				startIndex = i + 1

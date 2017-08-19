@@ -5,7 +5,7 @@ import (
 	"mapreduce"
 	"os"
 	"strconv"
-	"strings"
+	"unicode"
 )
 
 // The mapping function is called once for each piece of the input.
@@ -14,9 +14,26 @@ import (
 // key/value pairs, each represented by a mapreduce.KeyValue.
 func mapF(document string, value string) (res []mapreduce.KeyValue) {
 	// TODO: you have to write this function
-	words := strings.Split(value, " ")
-	for _, key := range words {
-		res = append(res, mapreduce.KeyValue{key, "1"})
+
+	startIndex := 0
+	letterIdentified := false
+	runeSlice := []rune(value)
+
+	for i, v := range value {
+		if unicode.IsLetter(v) {
+			letterIdentified = true
+		} else {
+			if letterIdentified {
+				// a word generated
+				word := string(runeSlice[startIndex:i])
+				res = append(res, mapreduce.KeyValue{word, "1"})
+				letterIdentified = false
+				startIndex = i + 1
+			} else {
+				letterIdentified = false
+				startIndex = i + 1
+			}
+		}
 	}
 
 	return res

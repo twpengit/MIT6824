@@ -87,7 +87,8 @@ func doReduce(
 
 			// change latestKey to the new key and clear last values
 			latestKey = item.Key
-			latestValues = latestValues[:0]
+			latestValues = make([]string, 0)
+			latestValues = append(latestValues, item.Value)
 		} else {
 			// latestKey == item.Key, items for the same key
 			latestValues = append(latestValues, item.Value)
@@ -103,7 +104,7 @@ func doReduce(
 func writeToOutputFile(jobName string, reduceTaskNumber int, key, values string) {
 	fileName := mergeName(jobName, reduceTaskNumber)
 
-	outputFile, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND, os.ModePerm)
+	outputFile, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
 		fmt.Printf("Fail to open output file %s, error is %s", fileName, err)
 		return
