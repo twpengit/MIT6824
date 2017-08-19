@@ -24,5 +24,9 @@ func (mr *Master) schedule(phase jobPhase) {
 	//
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
+
+	args := new(DoTaskArgs)
+	ok := call(master, "Worker.DoTask", args, new(struct{}))
+
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
