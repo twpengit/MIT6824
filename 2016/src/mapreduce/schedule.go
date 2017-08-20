@@ -31,16 +31,18 @@ func (mr *Master) schedule(phase jobPhase) {
 
 	// if this is reduce phase, there is no more registration, so we work around by
 	// signal fail result for each worker to let workers start to work
-	//	if phase == reducePhase {
-	//		for idx, worker := range mr.workers {
-	//			if idx < ntasks {
-	//				go func() {
-	//					fmt.Printf("reduce case %s,%d\n", worker, idx)
-	//					workerStatusChannel <- workResult{worker, false, idx}
-	//				}()
-	//			}
-	//		}
-	//	}
+	if phase == reducePhase {
+		for idx, worker := range mr.workers {
+			if idx < ntasks {
+				go func(idx int, worker string) {
+					fmt.Printf("reduce case %s,%d\n", worker, idx)
+					workerStatusChannel <- workResult{worker, false, idx}
+				}(idx, worker)
+			}
+
+			assignedTaskCount++
+		}
+	}
 
 TaskLoop:
 	for {
@@ -108,6 +110,7 @@ TaskLoop:
 				args := new(DoTaskArgs)
 				args.Phase = phase
 				args.JobName = mr.jobName
+				fmt.Printf("first 2 tasks %d\n", result.fileIndex)
 				args.TaskNumber = result.fileIndex
 				args.File = mr.files[result.fileIndex]
 				args.NumOtherPhase = nios

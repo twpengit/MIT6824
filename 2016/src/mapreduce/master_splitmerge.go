@@ -54,7 +54,7 @@ func (mr *Master) merge() {
 func removeFile(n string) {
 	err := os.Remove(n)
 	if err != nil {
-		log.Fatal("CleanupFiles ", err)
+		//log.Fatal("CleanupFiles ", err)
 	}
 }
 
