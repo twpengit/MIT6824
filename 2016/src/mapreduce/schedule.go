@@ -1,6 +1,10 @@
 package mapreduce
 
-import "fmt"
+import (
+	"fmt"
+	"math/rand"
+	"time"
+)
 
 // schedule starts and waits for all tasks in the given phase (Map or Reduce).
 func (mr *Master) schedule(phase jobPhase) {
@@ -27,20 +31,17 @@ func (mr *Master) schedule(phase jobPhase) {
 
 	completedTaskCount := 0
 	assignedTaskCount := 0
+	workerList := make(map[string]bool)
 	workerStatusChannel := make(chan workResult)
+	failedTaskList := make([]int, 0)
 
 	// if this is reduce phase, there is no more registration, so we work around by
-	// signal fail result for each worker to let workers start to work
+	// signal registration manualy to let workers start working
 	if phase == reducePhase {
-		for idx, worker := range mr.workers {
-			if idx < ntasks {
-				go func(idx int, worker string) {
-					fmt.Printf("reduce case %s,%d\n", worker, idx)
-					workerStatusChannel <- workResult{worker, false, idx}
-				}(idx, worker)
-			}
-
-			assignedTaskCount++
+		for _, worker := range mr.workers {
+			go func(worker string) {
+				mr.registerChannel <- worker
+			}(worker)
 		}
 	}
 
@@ -48,43 +49,63 @@ TaskLoop:
 	for {
 		select {
 		case client := <-mr.registerChannel:
-			if assignedTaskCount < ntasks {
-				fmt.Printf("New client registered, %s\n", client)
-				// the worker has already been added to mr.workers
-				// assign task to this worker
-				args := new(DoTaskArgs)
-				args.Phase = phase
-				args.JobName = mr.jobName
-				args.TaskNumber = assignedTaskCount
-				args.File = mr.files[assignedTaskCount]
-				args.NumOtherPhase = nios
-
-				//case mapPhase:
-				//	doMap(arg.JobName, arg.TaskNumber, arg.File, arg.NumOtherPhase, wk.Map)
-				//case reducePhase:
-				//	doReduce(arg.JobName, arg.TaskNumber, arg.NumOtherPhase, wk.Reduce)
-
-				go func() {
-					ok := call(client, "Worker.DoTask", args, new(struct{}))
-					if ok {
-						workerStatusChannel <- workResult{client, true, assignedTaskCount}
-					} else {
-						workerStatusChannel <- workResult{client, false, assignedTaskCount}
-					}
-				}()
-
-				assignedTaskCount++
-			}
+			// Add this worker to worker list, and available to work on task
+			workerList[client] = true
 
 		case result := <-workerStatusChannel:
 			// Worker finish task, avaiable to do next task
+			workerList[result.worker] = true
+
 			if result.result {
 				// task complete
 				completedTaskCount++
 				if completedTaskCount == ntasks {
 					break TaskLoop
 				}
+				fmt.Printf("Phase - %s, Task id - %d succeed\n", phase, result.taskNumber)
+			} else {
+				//workerList[result.worker] = false
 
+				// Add failed task to the failed task list
+				failedTaskList = append(failedTaskList, result.taskNumber)
+				fmt.Printf("Phase - %s, Task id - %d failed\n", phase, result.taskNumber)
+			}
+
+		default:
+			// Assign task to a random picked available worker
+			worker := pickWorkerRandomly(workerList)
+
+			if worker == "" {
+				continue
+			}
+
+			// Check the failed task first
+			if len(failedTaskList) > 0 {
+				taskNumber := failedTaskList[0]
+				fmt.Printf("Assign failed task %d\n", taskNumber)
+
+				args := new(DoTaskArgs)
+				args.Phase = phase
+				args.JobName = mr.jobName
+				args.TaskNumber = taskNumber
+				args.File = mr.files[taskNumber]
+				args.NumOtherPhase = nios
+
+				// A task assigned to this worker, the worker is not available now
+				workerList[worker] = false
+
+				go func(worker string, taskId int) {
+					ok := call(worker, "Worker.DoTask", args, new(struct{}))
+					if ok {
+						workerStatusChannel <- workResult{worker, true, taskId}
+					} else {
+						workerStatusChannel <- workResult{worker, false, taskId}
+					}
+				}(worker, taskNumber)
+
+				failedTaskList = failedTaskList[1:len(failedTaskList)]
+			} else {
+				// Check unassigned task now
 				if assignedTaskCount < ntasks {
 					// Assign a new task to the worker
 					args := new(DoTaskArgs)
@@ -94,42 +115,22 @@ TaskLoop:
 					args.File = mr.files[assignedTaskCount]
 					args.NumOtherPhase = nios
 
-					go func() {
-						ok := call(result.worker, "Worker.DoTask", args, new(struct{}))
+					fmt.Printf("Assign new task %d\n", assignedTaskCount)
+
+					// A task assigned to this worker, the worker is not available now
+					workerList[worker] = false
+
+					go func(worker string, taskId int) {
+						ok := call(worker, "Worker.DoTask", args, new(struct{}))
 						if ok {
-							workerStatusChannel <- workResult{result.worker, true, assignedTaskCount}
+							workerStatusChannel <- workResult{worker, true, taskId}
 						} else {
-							workerStatusChannel <- workResult{result.worker, false, assignedTaskCount}
+							workerStatusChannel <- workResult{worker, false, taskId}
 						}
-					}()
+					}(worker, assignedTaskCount)
 
 					assignedTaskCount++
 				}
-			} else {
-				// Assign the failed task to the worker again
-				args := new(DoTaskArgs)
-				args.Phase = phase
-				args.JobName = mr.jobName
-				fmt.Printf("first 2 tasks %d\n", result.fileIndex)
-				args.TaskNumber = result.fileIndex
-				args.File = mr.files[result.fileIndex]
-				args.NumOtherPhase = nios
-
-				fmt.Printf("reduce case %s,%d\n", args.Phase, args.TaskNumber)
-
-				//case mapPhase:
-				//	doMap(arg.JobName, arg.TaskNumber, arg.File, arg.NumOtherPhase, wk.Map)
-				//case reducePhase:
-				//	doReduce(arg.JobName, arg.TaskNumber, arg.NumOtherPhase, wk.Reduce)
-
-				go func() {
-					ok := call(result.worker, "Worker.DoTask", args, new(struct{}))
-					if ok {
-						workerStatusChannel <- workResult{result.worker, true, result.fileIndex}
-					} else {
-						workerStatusChannel <- workResult{result.worker, false, result.fileIndex}
-					}
-				}()
 			}
 		}
 	}
@@ -137,8 +138,25 @@ TaskLoop:
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
 
+func pickWorkerRandomly(workerList map[string]bool) string {
+	validWorkers := make([]string, 0)
+	for key, value := range workerList {
+		if value {
+			validWorkers = append(validWorkers, key)
+		}
+	}
+
+	if len(validWorkers) > 0 {
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		idx := r.Intn(len(validWorkers))
+		return validWorkers[idx]
+	} else {
+		return ""
+	}
+}
+
 type workResult struct {
-	worker    string
-	result    bool
-	fileIndex int
+	worker     string
+	result     bool
+	taskNumber int
 }
