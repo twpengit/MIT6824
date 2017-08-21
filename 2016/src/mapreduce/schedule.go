@@ -64,8 +64,6 @@ TaskLoop:
 				}
 				fmt.Printf("Phase - %s, Task id - %d succeed\n", phase, result.taskNumber)
 			} else {
-				//workerList[result.worker] = false
-
 				// Add failed task to the failed task list
 				failedTaskList = append(failedTaskList, result.taskNumber)
 				fmt.Printf("Phase - %s, Task id - %d failed\n", phase, result.taskNumber)
