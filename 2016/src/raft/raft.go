@@ -17,7 +17,10 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 import "labrpc"
 
 // import "bytes"
@@ -48,12 +51,15 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	leader int // index to leader
+	leader                     int           // index to leader
+	applyMsgCh                 chan ApplyMsg // apply message channel
+	voteRequestReceived        bool          // whether received vote request or not
+	heartbeatWithLeaderTimeout bool          // wether heart beat with leader is timeout or not
 
 	// Persistent state on all servers
 	currentTerm int
 	votedFor    int
-	logs        []logEntry
+	logs        []LogEntry
 
 	// Volatile state on all servers
 	commitIndex int
@@ -107,6 +113,8 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here.
+	Term     int
+	LeaderID int
 }
 
 //
@@ -114,13 +122,68 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here.
+	Term     int
+	LeaderID int
+	Voted    bool
+}
+
+type HeartBeatArgs struct {
+	Term     int
+	LeaderID int
+}
+
+type HeartBeatReply struct {
+	Term              int
+	LeaderID          int
+	HeartBeatReceived bool
 }
 
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !rf.heartbeatWithLeaderTimeout {
+		// If I havn't timeout for receive heart beat with last leader,
+		// I will reject this vote
+		reply.LeaderID = args.LeaderID
+		reply.Term = args.Term
+		reply.Voted = false
+	} else if args.LeaderID == rf.me {
+		// If this is a vote from myself, I will vote
+		reply.LeaderID = args.LeaderID
+		reply.Term = args.Term
+		reply.Voted = true
+	} else if args.Term <= rf.currentTerm {
+		// If termid in this vote is less than or eaqul to my term id,
+		// I will reject this vote also
+		reply.LeaderID = args.LeaderID
+		reply.Term = args.Term
+		reply.Voted = false
+	} else {
+		// Else I will vote for the new leader
+		reply.LeaderID = args.LeaderID
+		reply.Term = args.Term
+		reply.Voted = true
+	}
+}
+
+// Handle heart beat from leader
+func (rf *Raft) HandleHeartBeat(args HeartBeatArgs, reply *HeartBeatReply) {
+	if args.Term == rf.currentTerm {
+		if args.LeaderID == rf.leader {
+			// Need to reset heart beat timeout timer and wait for next heart beat
+		} else {
+			// This is not a valid heart beat, do nothing
+		}
+	} else if args.Term < rf.currentTerm {
+		// This is not a valid heart beat, do nothing
+	} else {
+		// This is heart beat from new leader, record new leader, reset heart beat
+		// timeout timer and wait for next heart beat
+		rf.leader = args.LeaderID
+	}
 }
 
 //
@@ -142,6 +205,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendHeartBeat(server int, args HeartBeatArgs, reply *HeartBeatReply) bool {
+	ok := rf.peers[server].Call("Raft.HandleHeartBeat", args, reply)
 	return ok
 }
 
@@ -172,7 +240,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.logs)
 		term = rf.currentTerm
 
-		// add this log
+		// I'm leader now, add this log to my log list first
+		newLogEntry := LogEntry{term, command}
+		rf.logs = append(rf.logs, newLogEntry)
+
+		// Initial a go routine to dispatch log to each peer
+		go func(index int, command interface{}) {
+			for _, peer := range rf.peers {
+				peer.Call("", new(struct{}), new(struct{}))
+			}
+
+			// each time a new entry is committed to the log, each Raft peer
+			// should send an ApplyMsg to the service (or tester).
+			msg := ApplyMsg{Index: index, Command: command}
+			rf.applyMsgCh <- msg
+		}(index, command)
 	}
 
 	return index, term, isLeader
@@ -207,14 +289,59 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.applyMsgCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	// start a backgound routine to wait timeout
+	go rf.checkTimeoutForVote()
+
 	return rf
 }
 
-type logEntry struct {
-	term    int
-	command interface{}
+func (rf *Raft) checkTimeoutForVote() {
+	time.Sleep(time.Millisecond * 1000)
+	rf.mu.Lock()
+	voteRequestReceived := rf.voteRequestReceived
+	rf.mu.Unlock()
+
+	// If I havn't received vote request after time out from any other peer,
+	// I will initial a vote request
+	if !voteRequestReceived {
+		voteCount := 0
+		for idx, _ := range rf.peers {
+			rf.currentTerm++
+			args := RequestVoteArgs{rf.currentTerm, rf.me}
+
+			reply := new(RequestVoteReply)
+			res := rf.sendRequestVote(idx, args, reply)
+			if !res {
+				continue
+			}
+
+			if reply.Voted {
+				voteCount++
+			}
+		}
+
+		// If I get majority of the vote, I will claim I am the new leader
+		if voteCount > (len(rf.peers) / 2) {
+			rf.StartHeartBeat()
+		}
+	}
+}
+
+func (rf *Raft) StartHeartBeat() {
+	args := HeartBeatArgs{rf.currentTerm, rf.me}
+	reply := new(HeartBeatReply)
+
+	for idx, _ := range rf.peers {
+		rf.sendHeartBeat(idx, args, reply)
+	}
+}
+
+type LogEntry struct {
+	Term    int
+	Command interface{}
 }
