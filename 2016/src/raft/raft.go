@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -55,6 +56,14 @@ type Raft struct {
 	applyMsgCh                 chan ApplyMsg // apply message channel
 	voteRequestReceived        bool          // whether received vote request or not
 	heartbeatWithLeaderTimeout bool          // wether heart beat with leader is timeout or not
+
+	// indicate there is a new leader election happen,no matter start vote or new
+	// leader elected
+	newLeaderElected chan bool
+	// indicate I am elected as the new leader
+	iAmNewLeader chan bool
+	// indicate there is a new vote request when I am leader
+	newVoteRequested chan bool
 
 	// Persistent state on all servers
 	currentTerm int
@@ -208,7 +217,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
-func (rf *Raft) sendHeartBeat(server int, args HeartBeatArgs, reply *HeartBeatReply) bool {
+func (rf *Raft) sendHeartBeat(server int, args LogEntry, reply *HeartBeatReply) bool {
 	ok := rf.peers[server].Call("Raft.HandleHeartBeat", args, reply)
 	return ok
 }
@@ -241,7 +250,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 
 		// I'm leader now, add this log to my log list first
-		newLogEntry := LogEntry{term, command}
+		newLogEntry := LogEntry{term, rf.me, command}
 		rf.logs = append(rf.logs, newLogEntry)
 
 		// Initial a go routine to dispatch log to each peer
@@ -294,54 +303,88 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start a backgound routine to wait timeout
-	go rf.checkTimeoutForVote()
+	// I'm a candidator now, need to start the random timer checker
+	go rf.checkTimeoutForElection()
 
 	return rf
 }
 
-func (rf *Raft) checkTimeoutForVote() {
-	time.Sleep(time.Millisecond * 1000)
-	rf.mu.Lock()
-	voteRequestReceived := rf.voteRequestReceived
-	rf.mu.Unlock()
+func (rf *Raft) checkTimeoutForElection() {
+	// I'm the follower(isCandidator = false) or candidator now
+	isCandidator := true
+	timeout := 0
+	voteCount := 0
 
-	// If I havn't received vote request after time out from any other peer,
-	// I will initial a vote request
-	if !voteRequestReceived {
-		voteCount := 0
-		for idx, _ := range rf.peers {
-			rf.currentTerm++
-			args := RequestVoteArgs{rf.currentTerm, rf.me}
-
-			reply := new(RequestVoteReply)
-			res := rf.sendRequestVote(idx, args, reply)
-			if !res {
-				continue
-			}
-
-			if reply.Voted {
-				voteCount++
-			}
+	for {
+		if isCandidator {
+			// if I am a candidator, I will use a random timeout to check
+			r := rand.New(rand.NewSource(time.Now().UnixNano()))
+			timeout = r.Intn(1000)
+			voteCount = 0
+		} else {
+			// if I am a follower, I will use a fixed timeout to check
+			timeout = 1000
 		}
 
-		// If I get majority of the vote, I will claim I am the new leader
-		if voteCount > (len(rf.peers) / 2) {
-			rf.StartHeartBeat()
+		select {
+		case <-rf.newLeaderElected:
+			// I have received a valid new leader heart beat before time out, so I
+			// become a follower now
+			isCandidator = false
+		case <-time.After(time.Duration(timeout) * time.Millisecond):
+			// havn't received heart beat from other peers, so I request vote from
+			// each of peer
+			isCandidator = true
+
+			for idx, _ := range rf.peers {
+				rf.currentTerm++
+
+				args := RequestVoteArgs{rf.currentTerm, rf.me}
+				reply := new(RequestVoteReply)
+				res := rf.sendRequestVote(idx, args, reply)
+
+				if !res {
+					continue
+				} else {
+					voteCount++
+				}
+			}
+
+			if voteCount > len(rf.peers)/2 {
+				// I received majority of the votes, I am selected as the new leader
+				rf.iAmNewLeader <- true
+				// I'm leader now, wait untile I receive a new vote request
+				<-rf.newVoteRequested
+				isCandidator = false
+			}
 		}
 	}
 }
 
-func (rf *Raft) StartHeartBeat() {
-	args := HeartBeatArgs{rf.currentTerm, rf.me}
-	reply := new(HeartBeatReply)
+func (rf *Raft) checkHeartBeat() {
+LOOP:
+	// wait till I am the leader
+	<-rf.iAmNewLeader
 
-	for idx, _ := range rf.peers {
-		rf.sendHeartBeat(idx, args, reply)
+	for {
+		select {
+		case <-time.After(time.Duration(500) * time.Millisecond):
+			// send heart beat to each peer
+			args := LogEntry{rf.currentTerm, rf.me, nil}
+			reply := new(HeartBeatReply)
+
+			for idx, _ := range rf.peers {
+				rf.sendHeartBeat(idx, args, reply)
+			}
+		case <-rf.newVoteRequested:
+			// received a new vote request
+			goto LOOP
+		}
 	}
 }
 
 type LogEntry struct {
-	Term    int
-	Command interface{}
+	Term     int
+	ServerID int
+	Command  interface{}
 }
