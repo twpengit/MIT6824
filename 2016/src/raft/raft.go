@@ -88,6 +88,13 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here.
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	term = rf.currentTerm
+	isleader = (rf.me == rf.leader)
+
 	return term, isleader
 }
 
@@ -158,6 +165,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		fmt.Printf("Vote - I'm %d, my term is %d, got vote from %d, his term is %d\n",
 			rf.me, rf.currentTerm, args.LeaderID, args.Term)
 		rf.currentTerm = args.Term
+		rf.leader = args.LeaderID
 	} else {
 		fmt.Println("1")
 		reply.LeaderID = args.LeaderID
@@ -184,10 +192,8 @@ func (rf *Raft) HandleAppendEntries(args LogEntry, reply *AppendLogEntryReply) {
 
 			reply.LogEntryAppended = true
 
-			go func() {
-				fmt.Printf("Handle heart beat in server %d\n", rf.me)
-				rf.validLeaderHeartbeat <- true
-			}()
+			fmt.Printf("Handle heart beat in server %d\n", rf.me)
+			rf.validLeaderHeartbeat <- true
 		}
 	} else {
 		// This is a normal append log entry command
@@ -329,7 +335,7 @@ func (rf *Raft) checkTimeoutForElection() {
 			voteCount = 0
 		} else {
 			// if I am a follower, I will use a fixed timeout to check
-			timeout = 2000
+			timeout = 1000
 		}
 
 		if timer == nil {
@@ -358,7 +364,6 @@ func (rf *Raft) checkTimeoutForElection() {
 			// each of peer
 
 			rf.mu.Lock()
-			defer rf.mu.Unlock()
 
 			// Reset validLeaderHeartbeat or newVoteRequested notification in case
 			// they happened at same time
@@ -398,12 +403,17 @@ func (rf *Raft) checkTimeoutForElection() {
 			}
 
 			if voteCount > len(rf.peers)/2 {
-				fmt.Println("HeartBeat1")
 				// I received majority of the votes, I am elected as the new leader
+				rf.leader = rf.me
 				rf.iAmNewLeader <- true
+
+				rf.mu.Unlock()
+
 				// I'm leader now, wait untile I receive a step back notification
 				<-rf.stepBack
 				isCandidator = false
+			} else {
+				rf.mu.Unlock()
 			}
 		}
 	}
@@ -414,7 +424,6 @@ LOOP:
 	<-rf.iAmNewLeader
 
 	// Send out heart beat now
-	fmt.Println("HeartBeat2")
 	args := LogEntry{rf.currentTerm, rf.me, nil}
 	reply := new(AppendLogEntryReply)
 
