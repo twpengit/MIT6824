@@ -376,7 +376,12 @@ func (rf *Raft) checkTimeoutForElection() {
 			}
 
 			isCandidator = true
+			rf.leader = -1
 			rf.currentTerm++
+
+			currentTerm := rf.currentTerm
+
+			rf.mu.Unlock()
 
 			for idx, _ := range rf.peers {
 				fmt.Printf("server %d request vote from %d\n", rf.me, idx)
@@ -387,7 +392,7 @@ func (rf *Raft) checkTimeoutForElection() {
 					continue
 				}
 
-				args := RequestVoteArgs{rf.currentTerm, rf.me}
+				args := RequestVoteArgs{currentTerm, rf.me}
 				reply := new(RequestVoteReply)
 				res := rf.sendRequestVote(idx, args, reply)
 
@@ -402,6 +407,7 @@ func (rf *Raft) checkTimeoutForElection() {
 				}
 			}
 
+			rf.mu.Lock()
 			if voteCount > len(rf.peers)/2 {
 				// I received majority of the votes, I am elected as the new leader
 				rf.leader = rf.me
