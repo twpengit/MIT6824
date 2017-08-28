@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -54,16 +55,17 @@ type Raft struct {
 
 	leader                     int           // index to leader
 	applyMsgCh                 chan ApplyMsg // apply message channel
-	voteRequestReceived        bool          // whether received vote request or not
 	heartbeatWithLeaderTimeout bool          // wether heart beat with leader is timeout or not
 
 	// indicate there is a new leader election happen,no matter start vote or new
 	// leader elected
-	newLeaderElected chan bool
+	validLeaderHeartbeat chan bool
 	// indicate I am elected as the new leader
 	iAmNewLeader chan bool
 	// indicate there is a new vote request when I am leader
 	newVoteRequested chan bool
+	// indicate I will step back as a follower now
+	stepBack chan bool
 
 	// Persistent state on all servers
 	currentTerm int
@@ -136,62 +138,59 @@ type RequestVoteReply struct {
 	Voted    bool
 }
 
-type HeartBeatArgs struct {
-	Term     int
-	LeaderID int
-}
-
-type HeartBeatReply struct {
-	Term              int
-	LeaderID          int
-	HeartBeatReceived bool
-}
-
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
+	fmt.Printf("Receive vote request - I'm %d, my term is %d, got vote from %d, his term is %d\n",
+		rf.me, rf.currentTerm, args.LeaderID, args.Term)
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if !rf.heartbeatWithLeaderTimeout {
-		// If I havn't timeout for receive heart beat with last leader,
-		// I will reject this vote
-		reply.LeaderID = args.LeaderID
-		reply.Term = args.Term
-		reply.Voted = false
-	} else if args.LeaderID == rf.me {
-		// If this is a vote from myself, I will vote
+
+	if args.Term > rf.currentTerm {
 		reply.LeaderID = args.LeaderID
 		reply.Term = args.Term
 		reply.Voted = true
-	} else if args.Term <= rf.currentTerm {
-		// If termid in this vote is less than or eaqul to my term id,
-		// I will reject this vote also
-		reply.LeaderID = args.LeaderID
-		reply.Term = args.Term
-		reply.Voted = false
+
+		rf.newVoteRequested <- true
+
+		fmt.Printf("Vote - I'm %d, my term is %d, got vote from %d, his term is %d\n",
+			rf.me, rf.currentTerm, args.LeaderID, args.Term)
+		rf.currentTerm = args.Term
 	} else {
-		// Else I will vote for the new leader
+		fmt.Println("1")
 		reply.LeaderID = args.LeaderID
 		reply.Term = args.Term
-		reply.Voted = true
+		reply.Voted = false
+
+		fmt.Printf("Don't vote - I'm %d, my term is %d, got vote from %d, his term is %d\n",
+			rf.me, rf.currentTerm, args.LeaderID, args.Term)
 	}
 }
 
-// Handle heart beat from leader
-func (rf *Raft) HandleHeartBeat(args HeartBeatArgs, reply *HeartBeatReply) {
-	if args.Term == rf.currentTerm {
-		if args.LeaderID == rf.leader {
-			// Need to reset heart beat timeout timer and wait for next heart beat
+// Append entries handler
+func (rf *Raft) HandleAppendEntries(args LogEntry, reply *AppendLogEntryReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Command == nil {
+		// This is a heart beat command
+		if args.Term < rf.currentTerm {
+			reply.LogEntryAppended = false
 		} else {
-			// This is not a valid heart beat, do nothing
+			rf.leader = args.ServerID
+			rf.currentTerm = args.Term
+
+			reply.LogEntryAppended = true
+
+			go func() {
+				fmt.Printf("Handle heart beat in server %d\n", rf.me)
+				rf.validLeaderHeartbeat <- true
+			}()
 		}
-	} else if args.Term < rf.currentTerm {
-		// This is not a valid heart beat, do nothing
 	} else {
-		// This is heart beat from new leader, record new leader, reset heart beat
-		// timeout timer and wait for next heart beat
-		rf.leader = args.LeaderID
+		// This is a normal append log entry command
 	}
 }
 
@@ -217,8 +216,8 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
-func (rf *Raft) sendHeartBeat(server int, args LogEntry, reply *HeartBeatReply) bool {
-	ok := rf.peers[server].Call("Raft.HandleHeartBeat", args, reply)
+func (rf *Raft) sendHeartBeat(server int, args LogEntry, reply *AppendLogEntryReply) bool {
+	ok := rf.peers[server].Call("Raft.HandleAppendEntries", args, reply)
 	return ok
 }
 
@@ -239,9 +238,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	if rf.me != rf.leader {
 		isLeader = false
@@ -296,65 +292,117 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	fmt.Printf("rf.me is %d\n", rf.me)
 
 	// Your initialization code here.
 	rf.applyMsgCh = applyCh
+	rf.validLeaderHeartbeat = make(chan bool, 1)
+	rf.iAmNewLeader = make(chan bool, 1)
+	rf.newVoteRequested = make(chan bool, 1)
+	rf.stepBack = make(chan bool, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// I'm a candidator now, need to start the random timer checker
+	// I'm a candidator now, need to start the random timer to start election
 	go rf.checkTimeoutForElection()
+
+	// Be prepared that I am elected as the new leader also
+	go rf.checkHeartBeat()
 
 	return rf
 }
 
 func (rf *Raft) checkTimeoutForElection() {
-	// I'm the follower(isCandidator = false) or candidator now
+	// I'm the follower(isCandidator = false) or candidator(isCandidator = true) now
 	isCandidator := true
 	timeout := 0
 	voteCount := 0
+
+	var timer *time.Timer = nil
 
 	for {
 		if isCandidator {
 			// if I am a candidator, I will use a random timeout to check
 			r := rand.New(rand.NewSource(time.Now().UnixNano()))
-			timeout = r.Intn(1000)
+			timeout = r.Intn(100)
 			voteCount = 0
 		} else {
 			// if I am a follower, I will use a fixed timeout to check
-			timeout = 1000
+			timeout = 2000
+		}
+
+		if timer == nil {
+			timer = time.NewTimer(time.Duration(timeout) * time.Millisecond)
+			fmt.Printf("Server %d check timeout for election as a %v, timeout is %d\n", rf.me, isCandidator, timeout)
+		} else {
+			timer.Reset(time.Duration(timeout) * time.Millisecond)
+			fmt.Printf("Server %d check timeout for election as a %v, reset timeout is %d\n", rf.me, isCandidator, timeout)
 		}
 
 		select {
-		case <-rf.newLeaderElected:
+		case <-rf.validLeaderHeartbeat:
 			// I have received a valid new leader heart beat before time out, so I
-			// become a follower now
+			// am a follower now, I will keep checking valid heart beat before timeout
 			isCandidator = false
-		case <-time.After(time.Duration(timeout) * time.Millisecond):
+			timer.Stop()
+			fmt.Printf("server %d got validLeaderHeartbeat\n", rf.me)
+		case <-rf.newVoteRequested:
+			// I have received a valid vote request before time out, so I am a follower
+			// now, I will keep checking valid heart beat before timeout
+			isCandidator = false
+			timer.Stop()
+			fmt.Printf("server %d got newVoteRequested\n", rf.me)
+		case <-timer.C:
 			// havn't received heart beat from other peers, so I request vote from
 			// each of peer
+
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+
+			// Reset validLeaderHeartbeat or newVoteRequested notification in case
+			// they happened at same time
+			for i := 0; i < len(rf.validLeaderHeartbeat); i++ {
+				<-rf.validLeaderHeartbeat
+			}
+
+			for i := 0; i < len(rf.newVoteRequested); i++ {
+				<-rf.newVoteRequested
+			}
+
 			isCandidator = true
+			rf.currentTerm++
 
 			for idx, _ := range rf.peers {
-				rf.currentTerm++
+				fmt.Printf("server %d request vote from %d\n", rf.me, idx)
+
+				if idx == rf.me {
+					// I always vote for myself
+					voteCount++
+					continue
+				}
 
 				args := RequestVoteArgs{rf.currentTerm, rf.me}
 				reply := new(RequestVoteReply)
 				res := rf.sendRequestVote(idx, args, reply)
 
 				if !res {
+					fmt.Printf("Server %d request vote failed\n", rf.me)
 					continue
-				} else {
+				} else if reply.Voted {
 					voteCount++
+					fmt.Printf("Server %d got vote %d\n", rf.me, voteCount)
+				} else {
+					fmt.Printf("Server %d got vote rejected %d\n", rf.me, voteCount)
 				}
 			}
 
 			if voteCount > len(rf.peers)/2 {
-				// I received majority of the votes, I am selected as the new leader
+				fmt.Println("HeartBeat1")
+				// I received majority of the votes, I am elected as the new leader
 				rf.iAmNewLeader <- true
-				// I'm leader now, wait untile I receive a new vote request
-				<-rf.newVoteRequested
+				// I'm leader now, wait untile I receive a step back notification
+				<-rf.stepBack
 				isCandidator = false
 			}
 		}
@@ -363,21 +411,36 @@ func (rf *Raft) checkTimeoutForElection() {
 
 func (rf *Raft) checkHeartBeat() {
 LOOP:
-	// wait till I am the leader
 	<-rf.iAmNewLeader
+
+	// Send out heart beat now
+	fmt.Println("HeartBeat2")
+	args := LogEntry{rf.currentTerm, rf.me, nil}
+	reply := new(AppendLogEntryReply)
+
+	for idx, _ := range rf.peers {
+		if idx == rf.me {
+			continue
+		}
+		rf.sendHeartBeat(idx, args, reply)
+	}
 
 	for {
 		select {
 		case <-time.After(time.Duration(500) * time.Millisecond):
 			// send heart beat to each peer
 			args := LogEntry{rf.currentTerm, rf.me, nil}
-			reply := new(HeartBeatReply)
+			reply := new(AppendLogEntryReply)
 
 			for idx, _ := range rf.peers {
+				if idx == rf.me {
+					continue
+				}
 				rf.sendHeartBeat(idx, args, reply)
 			}
 		case <-rf.newVoteRequested:
 			// received a new vote request
+			rf.stepBack <- true
 			goto LOOP
 		}
 	}
@@ -387,4 +450,10 @@ type LogEntry struct {
 	Term     int
 	ServerID int
 	Command  interface{}
+}
+
+type AppendLogEntryReply struct {
+	Term             int
+	ServerID         int
+	LogEntryAppended bool
 }
