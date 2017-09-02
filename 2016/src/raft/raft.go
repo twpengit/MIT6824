@@ -191,12 +191,14 @@ func (rf *Raft) HandleAppendEntries(args LogEntry, reply *AppendLogEntryReply) {
 		if args.Term < rf.currentTerm {
 			reply.LogEntryAppended = false
 		} else {
+			preTerm := rf.currentTerm
 			rf.leader = args.ServerID
 			rf.currentTerm = args.Term
 
 			reply.LogEntryAppended = true
 
-			fmt.Printf("Handle heart beat in server %d\n", rf.me)
+			fmt.Printf("Handle heart beat in server %d, leader is %d, pre term is %d, current term is %d\n",
+				rf.me, args.ServerID, preTerm, rf.currentTerm)
 			rf.validLeaderHeartbeat <- true
 		}
 	} else {
@@ -225,9 +227,11 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term == rf.currentTerm {
+	if reply.Voted && args.Term == rf.currentTerm {
+		fmt.Printf("@vote from %d, current count %d, term is %d, preterm is %d\n", server, rf.currentVoteCount, rf.currentTerm, args.Term)
 		rf.currentVoteCount++
 		if rf.currentVoteCount > len(rf.peers)/2 {
+			fmt.Printf("!!!%d is elected as new leader, current vote count is %d\n", rf.me, rf.currentVoteCount)
 			rf.getDominateVote <- true
 		}
 	}
@@ -336,6 +340,7 @@ func (rf *Raft) checkTimeoutForElection() {
 	// I'm the follower(isCandidator = false) or candidator(isCandidator = true) now
 	needRandomTimeout := true
 	timeout := 0
+	isElecting := false
 
 	var timer *time.Timer = nil
 
@@ -385,8 +390,16 @@ func (rf *Raft) checkTimeoutForElection() {
 			// havn't received heart beat from other peers, or havn't got
 			// dominate votes, so I request vote from each of peer
 
+			if isElecting {
+				// If i am in electing and havn't got result yet, i will wait
+				// another random time to start next round of election
+				isElecting = false
+				needRandomTimeout = true
+				continue
+			}
+
 			rf.mu.Lock()
-			defer rf.mu.Unlock()
+			//defer rf.mu.Unlock()
 
 			// Reset validLeaderHeartbeat, newVoteRequested, getDominateVote
 			// notification in case they happened at same time
@@ -402,7 +415,6 @@ func (rf *Raft) checkTimeoutForElection() {
 				<-rf.getDominateVote
 			}
 
-			needRandomTimeout = false
 			rf.leader = -1
 			rf.currentTerm++
 			rf.currentVoteCount = 0
@@ -423,6 +435,11 @@ func (rf *Raft) checkTimeoutForElection() {
 
 				go rf.sendRequestVote(idx, args, reply)
 			}
+
+			isElecting = true
+			needRandomTimeout = false
+
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -457,6 +474,10 @@ LOOP:
 			}
 		case <-rf.newVoteRequested:
 			// received a new vote request
+			rf.stepBack <- true
+			goto LOOP
+		case <-rf.validLeaderHeartbeat:
+			// received a valid heart beat from new leader
 			rf.stepBack <- true
 			goto LOOP
 		}
