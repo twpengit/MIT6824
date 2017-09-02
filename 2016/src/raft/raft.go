@@ -66,6 +66,11 @@ type Raft struct {
 	newVoteRequested chan bool
 	// indicate I will step back as a follower now
 	stepBack chan bool
+	// indicate I have got dominate vote now
+	getDominateVote chan bool
+
+	// current vote count for me in this term
+	currentVoteCount int
 
 	// Persistent state on all servers
 	currentTerm int
@@ -167,7 +172,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.leader = args.LeaderID
 	} else {
-		fmt.Println("1")
 		reply.LeaderID = args.LeaderID
 		reply.Term = args.Term
 		reply.Voted = false
@@ -219,6 +223,14 @@ func (rf *Raft) HandleAppendEntries(args LogEntry, reply *AppendLogEntryReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term == rf.currentTerm {
+		rf.currentVoteCount++
+		if rf.currentVoteCount > len(rf.peers)/2 {
+			rf.getDominateVote <- true
+		}
+	}
 	return ok
 }
 
@@ -306,6 +318,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.iAmNewLeader = make(chan bool, 1)
 	rf.newVoteRequested = make(chan bool, 1)
 	rf.stepBack = make(chan bool, 1)
+	rf.getDominateVote = make(chan bool, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -321,18 +334,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) checkTimeoutForElection() {
 	// I'm the follower(isCandidator = false) or candidator(isCandidator = true) now
-	isCandidator := true
+	needRandomTimeout := true
 	timeout := 0
-	voteCount := 0
 
 	var timer *time.Timer = nil
 
 	for {
-		if isCandidator {
+		if needRandomTimeout {
 			// if I am a candidator, I will use a random timeout to check
 			r := rand.New(rand.NewSource(time.Now().UnixNano()))
 			timeout = r.Intn(100)
-			voteCount = 0
 		} else {
 			// if I am a follower, I will use a fixed timeout to check
 			timeout = 1000
@@ -340,33 +351,45 @@ func (rf *Raft) checkTimeoutForElection() {
 
 		if timer == nil {
 			timer = time.NewTimer(time.Duration(timeout) * time.Millisecond)
-			fmt.Printf("Server %d check timeout for election as a %v, timeout is %d\n", rf.me, isCandidator, timeout)
+			fmt.Printf("Server %d check timeout for election as a %v, timeout is %d\n", rf.me, needRandomTimeout, timeout)
 		} else {
 			timer.Reset(time.Duration(timeout) * time.Millisecond)
-			fmt.Printf("Server %d check timeout for election as a %v, reset timeout is %d\n", rf.me, isCandidator, timeout)
+			fmt.Printf("Server %d check timeout for election as a %v, reset timeout is %d\n", rf.me, needRandomTimeout, timeout)
 		}
 
 		select {
 		case <-rf.validLeaderHeartbeat:
 			// I have received a valid new leader heart beat before time out, so I
 			// am a follower now, I will keep checking valid heart beat before timeout
-			isCandidator = false
+			needRandomTimeout = false
 			timer.Stop()
 			fmt.Printf("server %d got validLeaderHeartbeat\n", rf.me)
 		case <-rf.newVoteRequested:
 			// I have received a valid vote request before time out, so I am a follower
 			// now, I will keep checking valid heart beat before timeout
-			isCandidator = false
+			needRandomTimeout = false
 			timer.Stop()
 			fmt.Printf("server %d got newVoteRequested\n", rf.me)
-		case <-timer.C:
-			// havn't received heart beat from other peers, so I request vote from
-			// each of peer
-
+		case <-rf.getDominateVote:
 			rf.mu.Lock()
 
-			// Reset validLeaderHeartbeat or newVoteRequested notification in case
-			// they happened at same time
+			rf.leader = rf.me
+			rf.iAmNewLeader <- true
+
+			rf.mu.Unlock()
+
+			// I'm leader now, wait untile I receive a step back notification
+			<-rf.stepBack
+			needRandomTimeout = true
+		case <-timer.C:
+			// havn't received heart beat from other peers, or havn't got
+			// dominate votes, so I request vote from each of peer
+
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+
+			// Reset validLeaderHeartbeat, newVoteRequested, getDominateVote
+			// notification in case they happened at same time
 			for i := 0; i < len(rf.validLeaderHeartbeat); i++ {
 				<-rf.validLeaderHeartbeat
 			}
@@ -375,51 +398,30 @@ func (rf *Raft) checkTimeoutForElection() {
 				<-rf.newVoteRequested
 			}
 
-			isCandidator = true
+			for i := 0; i < len(rf.getDominateVote); i++ {
+				<-rf.getDominateVote
+			}
+
+			needRandomTimeout = false
 			rf.leader = -1
 			rf.currentTerm++
+			rf.currentVoteCount = 0
 
 			currentTerm := rf.currentTerm
-
-			rf.mu.Unlock()
 
 			for idx, _ := range rf.peers {
 				fmt.Printf("server %d request vote from %d\n", rf.me, idx)
 
 				if idx == rf.me {
 					// I always vote for myself
-					voteCount++
+					rf.currentVoteCount++
 					continue
 				}
 
 				args := RequestVoteArgs{currentTerm, rf.me}
 				reply := new(RequestVoteReply)
-				res := rf.sendRequestVote(idx, args, reply)
 
-				if !res {
-					fmt.Printf("Server %d request vote failed\n", rf.me)
-					continue
-				} else if reply.Voted {
-					voteCount++
-					fmt.Printf("Server %d got vote %d\n", rf.me, voteCount)
-				} else {
-					fmt.Printf("Server %d got vote rejected %d\n", rf.me, voteCount)
-				}
-			}
-
-			rf.mu.Lock()
-			if voteCount > len(rf.peers)/2 {
-				// I received majority of the votes, I am elected as the new leader
-				rf.leader = rf.me
-				rf.iAmNewLeader <- true
-
-				rf.mu.Unlock()
-
-				// I'm leader now, wait untile I receive a step back notification
-				<-rf.stepBack
-				isCandidator = false
-			} else {
-				rf.mu.Unlock()
+				go rf.sendRequestVote(idx, args, reply)
 			}
 		}
 	}
@@ -437,7 +439,7 @@ LOOP:
 		if idx == rf.me {
 			continue
 		}
-		rf.sendHeartBeat(idx, args, reply)
+		go rf.sendHeartBeat(idx, args, reply)
 	}
 
 	for {
@@ -451,7 +453,7 @@ LOOP:
 				if idx == rf.me {
 					continue
 				}
-				rf.sendHeartBeat(idx, args, reply)
+				go rf.sendHeartBeat(idx, args, reply)
 			}
 		case <-rf.newVoteRequested:
 			// received a new vote request
