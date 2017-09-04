@@ -19,6 +19,7 @@ package raft
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -68,14 +69,18 @@ type Raft struct {
 	stepBack chan bool
 	// indicate I have got dominate vote now
 	getDominateVote chan bool
+	// indicate I as a leader has got dominate agreement from other servers
+	getDominateAgreementOnLog chan bool
 
 	// current vote count for me in this term
 	currentVoteCount int
+	// current log agreement count for me in this term
+	currentLogAgreementCount int
 
 	// Persistent state on all servers
 	currentTerm int
 	votedFor    int
-	logs        []LogEntry
+	logs        []LogEntity
 
 	// Volatile state on all servers
 	commitIndex int
@@ -186,23 +191,60 @@ func (rf *Raft) HandleAppendEntries(args LogEntry, reply *AppendLogEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Command == nil {
+	if args.Entries == nil {
 		// This is a heart beat command
 		if args.Term < rf.currentTerm {
 			reply.LogEntryAppended = false
 		} else {
 			preTerm := rf.currentTerm
-			rf.leader = args.ServerID
+			rf.leader = args.LeaderId
 			rf.currentTerm = args.Term
 
 			reply.LogEntryAppended = true
 
 			fmt.Printf("Handle heart beat in server %d, leader is %d, pre term is %d, current term is %d\n",
-				rf.me, args.ServerID, preTerm, rf.currentTerm)
+				rf.me, args.LeaderId, preTerm, rf.currentTerm)
 			rf.validLeaderHeartbeat <- true
 		}
 	} else {
 		// This is a normal append log entry command
+
+		if len(rf.logs) == 0 {
+			// this is the first log i have received
+			rf.logs = append(rf.logs, args.Entries...)
+			reply.LogEntryAppended = true
+		}
+
+		// if log term from leader is less then my latest term, i will reject this
+		// agreement
+		if args.PreLogTerm < rf.logs[len(rf.logs)-1].Term {
+			reply.LogEntryAppended = false
+		}
+
+		if len(rf.logs) < args.PreLogIndex {
+			// if i do not have enough log as leader has, i will reject this
+			// agreement
+			reply.LogEntryAppended = false
+		} else if rf.logs[args.PreLogIndex].Term != args.PreLogTerm {
+			// if the term in the same index does not match that from leader, i
+			// will reject this agreement and remove this log and logs follow that
+			// log
+			rf.logs = rf.logs[0 : len(rf.logs)-1]
+			reply.LogEntryAppended = false
+		} else {
+			// I agree on this log, append any new log into log list
+			rf.logs = append(rf.logs, args.Entries...)
+			reply.LogEntryAppended = true
+
+			// and set commit index according to the leader commit index
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(len(rf.logs)-1)))
+			}
+
+			// each time a new entry is committed to the log, each Raft peer
+			// should send an ApplyMsg to the service (or tester).
+			// todo
+		}
 	}
 }
 
@@ -227,6 +269,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	if reply.Voted && args.Term == rf.currentTerm {
 		fmt.Printf("@vote from %d, current count %d, term is %d, preterm is %d\n", server, rf.currentVoteCount, rf.currentTerm, args.Term)
 		rf.currentVoteCount++
@@ -238,8 +281,18 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
-func (rf *Raft) sendHeartBeat(server int, args LogEntry, reply *AppendLogEntryReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args LogEntry, reply *AppendLogEntryReply) bool {
 	ok := rf.peers[server].Call("Raft.HandleAppendEntries", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if reply.LogEntryAppended && reply.Term == rf.currentTerm {
+		rf.currentLogAgreementCount++
+		if rf.currentLogAgreementCount > len(rf.peers)/2 {
+			rf.getDominateAgreementOnLog <- true
+		}
+	}
+
 	return ok
 }
 
@@ -261,30 +314,96 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
+	rf.mu.Lock()
+
 	if rf.me != rf.leader {
+		// I'm not leader now, send to wrong server
 		isLeader = false
+		rf.mu.Unlock()
+
+		return index, term, isLeader
 	} else {
 		index = len(rf.logs)
 		term = rf.currentTerm
 
 		// I'm leader now, add this log to my log list first
-		newLogEntry := LogEntry{term, rf.me, command}
-		rf.logs = append(rf.logs, newLogEntry)
+		newLogEntry := LogEntry{term, rf.me, len(rf.logs) - 1,
+			rf.logs[len(rf.logs)-1].Term, []LogEntity{LogEntity{term, command}},
+			rf.commitIndex}
+		rf.logs = append(rf.logs, LogEntity{term, command})
 
-		// Initial a go routine to dispatch log to each peer
-		go func(index int, command interface{}) {
-			for _, peer := range rf.peers {
-				peer.Call("", new(struct{}), new(struct{}))
+		// Initial go routines to dispatch log to each other peer
+		rf.currentLogAgreementCount = 0
+
+		for idx, _ := range rf.peers {
+			if idx == rf.me {
+				rf.currentLogAgreementCount++
+				continue
 			}
+
+			go func(index int) {
+				appendLogEntryReply := new(AppendLogEntryReply)
+
+				for true {
+					res := rf.sendAppendEntries(index, newLogEntry, appendLogEntryReply)
+					if !res {
+						continue
+					} else if !appendLogEntryReply.LogEntryAppended {
+						// peer don't agree on this log, try with previous logs
+						term := newLogEntry.Term
+						leaderId := newLogEntry.LeaderId
+						preLogIndex := newLogEntry.PreLogIndex - 1
+						preLogTerm := rf.logs[preLogIndex].Term
+						entries := []LogEntity{rf.logs[preLogIndex]}
+						entries = append(entries, newLogEntry.Entries...)
+						leaderCommit := newLogEntry.LeaderCommit
+
+						newLogEntry = LogEntry{term, leaderId, preLogIndex,
+							preLogTerm, entries, leaderCommit}
+
+						continue
+					} else {
+						//  peer agree on this log
+						rf.currentLogAgreementCount++
+
+						if rf.currentLogAgreementCount > len(rf.peers)/2 {
+							getDominateAgreementOnLog <- true
+						}
+
+						break
+					}
+				}
+			}(idx)
+
+		}
+
+		rf.mu.Unlock()
+
+		// wait untile majority of server accept the log agreement, then we come
+		// to the state of committment
+		select {
+		case <-rf.getDominateAgreementOnLog:
+			rf.mu.Lock()
 
 			// each time a new entry is committed to the log, each Raft peer
 			// should send an ApplyMsg to the service (or tester).
 			msg := ApplyMsg{Index: index, Command: command}
 			rf.applyMsgCh <- msg
-		}(index, command)
+
+			// update last applied index first, this will be shared to other server
+			// by leader heart beat or next log agreement process
+			rf.lastApplied = len(rf.logs) - 1
+
+			rf.mu.Unlock()
+
+			return index, term, isLeader
+		case <-rf.validLeaderHeartbeat:
+			// I have got heart beat from new leader before I receive majority of
+			// log agreement
+			return -1, -1, false
+		}
 	}
 
-	return index, term, isLeader
 }
 
 //
@@ -449,28 +568,28 @@ LOOP:
 	<-rf.iAmNewLeader
 
 	// Send out heart beat now
-	args := LogEntry{rf.currentTerm, rf.me, nil}
+	args := LogEntry{Term: rf.currentTerm, LeaderId: rf.me, Entries: nil}
 	reply := new(AppendLogEntryReply)
 
 	for idx, _ := range rf.peers {
 		if idx == rf.me {
 			continue
 		}
-		go rf.sendHeartBeat(idx, args, reply)
+		go rf.sendAppendEntries(idx, args, reply)
 	}
 
 	for {
 		select {
 		case <-time.After(time.Duration(500) * time.Millisecond):
 			// send heart beat to each peer
-			args := LogEntry{rf.currentTerm, rf.me, nil}
+			args := LogEntry{Term: rf.currentTerm, LeaderId: rf.me, Entries: nil}
 			reply := new(AppendLogEntryReply)
 
 			for idx, _ := range rf.peers {
 				if idx == rf.me {
 					continue
 				}
-				go rf.sendHeartBeat(idx, args, reply)
+				go rf.sendAppendEntries(idx, args, reply)
 			}
 		case <-rf.newVoteRequested:
 			// received a new vote request
@@ -485,9 +604,17 @@ LOOP:
 }
 
 type LogEntry struct {
-	Term     int
-	ServerID int
-	Command  interface{}
+	Term         int
+	LeaderId     int
+	PreLogIndex  int
+	PreLogTerm   int
+	Entries      []LogEntity
+	LeaderCommit int
+}
+
+type LogEntity struct {
+	Term    int
+	Command interface{}
 }
 
 type AppendLogEntryReply struct {
