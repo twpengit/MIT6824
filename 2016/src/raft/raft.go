@@ -48,6 +48,8 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	applyCh chan ApplyMsg
+
 	// Persistent state on all servers:
 	currentTerm int
 	votedFor    int
@@ -105,6 +107,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here.
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -112,6 +118,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here.
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -119,6 +127,43 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// Set default reply first
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+
+	if args.Term < rf.currentTerm {
+		// Keep default reply
+	} else if args.Term == rf.currentTerm {
+		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+			if args.LastLogTerm < rf.log[len(rf.log)-1].term {
+				// Keep default reply
+			} else if args.LastLogIndex < len(rf.log) {
+				// Keep default reply
+			} else {
+				rf.currentTerm = args.Term
+				rf.votedFor = args.CandidateId
+				reply.Term = rf.currentTerm
+				reply.VoteGranted = true
+			}
+		} else {
+			reply.Term = rf.currentTerm
+			reply.VoteGranted = false
+		}
+	} else {
+		if args.LastLogTerm < rf.log[len(rf.log)-1].term {
+			// Keep default reply
+		} else if args.LastLogIndex < len(rf.log) {
+			// Keep default reply
+		} else {
+			rf.currentTerm = args.Term
+			rf.votedFor = args.CandidateId
+			reply.Term = rf.currentTerm
+			reply.VoteGranted = true
+		}
+	}
 }
 
 //
@@ -174,6 +219,18 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf *Raft) Execute() {
+	currentState := follower
+
+	for true {
+		switch currentState {
+		case follower:
+		case candidate:
+		case leader:
+		}
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -193,6 +250,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -204,3 +262,11 @@ type logEntry struct {
 	command interface{}
 	term    int
 }
+
+type serverState int
+
+const (
+	follower serverState = iota
+	candidate
+	leader
+)
