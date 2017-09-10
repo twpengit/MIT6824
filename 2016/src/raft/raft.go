@@ -17,7 +17,11 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"math/rand"
+	"sync"
+	"time"
+)
 import "labrpc"
 
 // import "bytes"
@@ -48,7 +52,12 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	applyCh chan ApplyMsg
+	applyCh           chan ApplyMsg
+	leaderHeartBeatCh chan bool
+	voteGrantedCh     chan bool
+	electedAsLeaderCh chan bool
+	voteCount         int
+	currentState      serverState
 
 	// Persistent state on all servers:
 	currentTerm int
@@ -188,6 +197,31 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PreLogIndex  int
+	PreLogTerm   int
+	Entries      []logEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	// Your code here.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+}
+
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -220,13 +254,104 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) Execute() {
-	currentState := follower
-
 	for true {
-		switch currentState {
+		switch rf.currentState {
 		case follower:
+			// Wait for the heart beat from leader or grant vote for candidate
+			timer := time.NewTimer(followerTimeoutInterval * time.Millisecond)
+
+			select {
+			case <-timer.C:
+				timer.Stop()
+				rf.currentState = candidate
+			case <-rf.leaderHeartBeatCh:
+				timer.Stop()
+				rf.currentState = follower
+			case <-rf.voteGrantedCh:
+				timer.Stop()
+				rf.currentState = follower
+			}
 		case candidate:
+			// Wait for a random timeout to start election for myself
+			r := rand.New(rand.NewSource(time.Now().UnixNano()))
+			timeout := r.Intn(int(candidateRandomTimeoutInterval))
+
+			timer := time.NewTimer(time.Duration(timeout) * time.Millisecond)
+
+			select {
+			case <-timer.C:
+				timer.Stop()
+				rf.mu.Lock()
+				rf.voteCount = 0
+				rf.votedFor = rf.me
+				rf.currentTerm++
+
+				for idx, _ := range rf.peers {
+					if idx == rf.me {
+						rf.voteCount++
+					} else {
+						args := RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log),
+							rf.log[len(rf.log)-1].term}
+						reply := new(RequestVoteReply)
+
+						go func(args RequestVoteArgs, reply *RequestVoteReply) {
+							for true {
+								res := rf.sendRequestVote(idx, args, reply)
+								if res {
+									rf.mu.Lock()
+									if reply.Term == rf.currentTerm &&
+										reply.VoteGranted &&
+										rf.currentState == candidate {
+										rf.voteCount++
+										if (rf.voteCount > len(rf.peers)/2) &&
+											((rf.voteCount - 1) < len(rf.peers)/2) {
+											rf.electedAsLeaderCh <- true
+										}
+									}
+
+									rf.mu.Unlock()
+									break
+								}
+							}
+
+						}(args, reply)
+					}
+				}
+
+				rf.mu.Unlock()
+			case <-rf.leaderHeartBeatCh:
+				timer.Stop()
+				rf.currentState = follower
+			case <-rf.electedAsLeaderCh:
+				timer.Stop()
+				rf.currentState = leader
+			}
 		case leader:
+			timer := time.NewTimer(time.Duration(leaderTimeoutInterval) * time.Millisecond)
+
+			select {
+			case <-timer.C:
+				timer.Stop()
+				for idx, _ := range rf.peers {
+					if idx == rf.me {
+						// Skip sending heart beat to myself
+					} else {
+						args := AppendEntriesArgs{rf.currentTerm, rf.me, len(rf.log),
+							rf.log[len(rf.log)-1].term, nil, rf.commitIndex}
+						reply := new(AppendEntriesReply)
+
+						go func(args AppendEntriesArgs, reply *AppendEntriesReply) {
+							rf.sendAppendEntries(idx, args, reply)
+						}(args, reply)
+					}
+				}
+			case <-rf.leaderHeartBeatCh:
+				timer.Stop()
+				rf.currentState = follower
+			case <-rf.voteGrantedCh:
+				timer.Stop()
+				rf.currentState = follower
+			}
 		}
 	}
 }
@@ -251,6 +376,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here.
 	rf.applyCh = applyCh
+	rf.currentState = follower
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -269,4 +395,10 @@ const (
 	follower serverState = iota
 	candidate
 	leader
+)
+
+const (
+	followerTimeoutInterval        time.Duration = 1000
+	candidateRandomTimeoutInterval time.Duration = 1000
+	leaderTimeoutInterval          time.Duration = 500
 )
