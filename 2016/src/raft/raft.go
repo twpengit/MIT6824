@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -145,6 +146,9 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	fmt.Printf("RequestVote - I'm %d, my term is %d, candidate is %d, candidate term is %d\n",
+		rf.me, rf.currentTerm, args.CandidateId, args.Term)
+
 	// Set default reply first
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
@@ -153,7 +157,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		// Keep default reply
 	} else if args.Term == rf.currentTerm {
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-			if args.LastLogTerm < rf.log[len(rf.log)-1].term {
+			lastLogTerm := 0
+			if len(rf.log) > 0 {
+				lastLogTerm = rf.log[len(rf.log)-1].term
+			}
+
+			if args.LastLogTerm < lastLogTerm {
 				// Keep default reply
 			} else if args.LastLogIndex < len(rf.log) {
 				// Keep default reply
@@ -163,22 +172,31 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 				reply.Term = rf.currentTerm
 				reply.VoteGranted = true
 
+			CLEAN_A:
 				for true {
 					// Clear messages in channel
 					select {
 					case <-rf.voteGrantedCh:
 					default:
-						break
+						break CLEAN_A
 					}
 				}
 				rf.voteGrantedCh <- true
+
+				fmt.Printf("Vote granted- I'm %d, my term is %d, candidate is %d, candidate term is %d\n",
+					rf.me, rf.currentTerm, args.CandidateId, args.Term)
 			}
 		} else {
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 		}
 	} else {
-		if args.LastLogTerm < rf.log[len(rf.log)-1].term {
+		lastLogTerm := 0
+		if len(rf.log) > 0 {
+			lastLogTerm = rf.log[len(rf.log)-1].term
+		}
+
+		if args.LastLogTerm < lastLogTerm {
 			// Keep default reply
 		} else if args.LastLogIndex < len(rf.log) {
 			// Keep default reply
@@ -188,15 +206,19 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 
+		CLEAN_B:
 			for true {
 				// Clear messages in channel
 				select {
 				case <-rf.voteGrantedCh:
 				default:
-					break
+					break CLEAN_B
 				}
 			}
 			rf.voteGrantedCh <- true
+
+			fmt.Printf("Vote granted- I'm %d, my term is %d, candidate is %d, candidate term is %d\n",
+				rf.me, rf.currentTerm, args.CandidateId, args.Term)
 		}
 	}
 }
@@ -252,12 +274,13 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			reply.Success = true
 			reply.Term = args.Term
 
+		CLEAN:
 			for true {
 				// Clear messages in channel
 				select {
 				case <-rf.leaderHeartBeatCh:
 				default:
-					break
+					break CLEAN
 				}
 			}
 			rf.leaderHeartBeatCh <- true
@@ -313,12 +336,18 @@ func (rf *Raft) Execute() {
 
 			select {
 			case <-timer.C:
+				fmt.Printf("Execute - server:%d, current state:%d wait timeout\n",
+					rf.me, rf.currentState)
 				timer.Stop()
 				rf.currentState = candidate
 			case <-rf.leaderHeartBeatCh:
+				fmt.Printf("Execute - server:%d, current state:%d server HB\n",
+					rf.me, rf.currentState)
 				timer.Stop()
 				rf.currentState = follower
 			case <-rf.voteGrantedCh:
+				fmt.Printf("Execute - server:%d, current state:%d vote granted\n",
+					rf.me, rf.currentState)
 				timer.Stop()
 				rf.currentState = follower
 			}
@@ -331,6 +360,8 @@ func (rf *Raft) Execute() {
 
 			select {
 			case <-timer.C:
+				fmt.Printf("Execute - server:%d, current state:%d wait %d timeout\n",
+					rf.me, rf.currentState, timeout)
 				timer.Stop()
 				rf.mu.Lock()
 				rf.voteCount = 0
@@ -341,27 +372,35 @@ func (rf *Raft) Execute() {
 					if idx == rf.me {
 						rf.voteCount++
 					} else {
-						args := RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log),
-							rf.log[len(rf.log)-1].term}
-						reply := new(RequestVoteReply)
+						lastLogTerm := 0
+						if len(rf.log) > 0 {
+							lastLogTerm = rf.log[len(rf.log)-1].term
+						}
+						voteArgs := RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log),
+							lastLogTerm}
+						voteReply := new(RequestVoteReply)
 
 						go func(args RequestVoteArgs, reply *RequestVoteReply) {
+						RETRY:
 							for true {
 								res := rf.sendRequestVote(idx, args, reply)
 								if res {
 									rf.mu.Lock()
+									fmt.Printf("1\n")
 									if reply.Term == rf.currentTerm &&
 										reply.VoteGranted &&
 										rf.currentState == candidate {
 										rf.voteCount++
 										if (rf.voteCount > len(rf.peers)/2) &&
-											((rf.voteCount - 1) < len(rf.peers)/2) {
+											((rf.voteCount - 1) <= len(rf.peers)/2) {
+											fmt.Printf("2\n")
+										CLEAN:
 											for true {
 												// Clear messages in channel
 												select {
 												case <-rf.electedAsLeaderCh:
 												default:
-													break
+													break CLEAN
 												}
 											}
 											rf.electedAsLeaderCh <- true
@@ -369,19 +408,28 @@ func (rf *Raft) Execute() {
 									}
 
 									rf.mu.Unlock()
-									break
+									break RETRY
 								}
 							}
 
-						}(args, reply)
+						}(voteArgs, voteReply)
 					}
 				}
 
 				rf.mu.Unlock()
+			case <-rf.voteGrantedCh:
+				fmt.Printf("Execute - server:%d, current state:%d vote granted\n",
+					rf.me, rf.currentState)
+				timer.Stop()
+				rf.currentState = follower
 			case <-rf.leaderHeartBeatCh:
+				fmt.Printf("Execute - server:%d, current state:%d server HB\n",
+					rf.me, rf.currentState)
 				timer.Stop()
 				rf.currentState = follower
 			case <-rf.electedAsLeaderCh:
+				fmt.Printf("Execute - server:%d, current state:%d elected as leader\n",
+					rf.me, rf.currentState)
 				timer.Stop()
 				rf.currentState = leader
 			}
@@ -390,24 +438,34 @@ func (rf *Raft) Execute() {
 
 			select {
 			case <-timer.C:
+				fmt.Printf("Execute - server:%d, current state:%d send HB\n",
+					rf.me, rf.currentState)
 				timer.Stop()
 				for idx, _ := range rf.peers {
 					if idx == rf.me {
 						// Skip sending heart beat to myself
 					} else {
-						args := AppendEntriesArgs{rf.currentTerm, rf.me, len(rf.log),
-							rf.log[len(rf.log)-1].term, nil, rf.commitIndex}
-						reply := new(AppendEntriesReply)
+						lastLogTerm := 0
+						if len(rf.log) > 0 {
+							lastLogTerm = rf.log[len(rf.log)-1].term
+						}
+						heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me, len(rf.log),
+							lastLogTerm, nil, rf.commitIndex}
+						heartBeatReply := new(AppendEntriesReply)
 
 						go func(args AppendEntriesArgs, reply *AppendEntriesReply) {
 							rf.sendAppendEntries(idx, args, reply)
-						}(args, reply)
+						}(heartBeatArgs, heartBeatReply)
 					}
 				}
 			case <-rf.leaderHeartBeatCh:
+				fmt.Printf("Execute - server:%d, current state:%d server HB\n",
+					rf.me, rf.currentState)
 				timer.Stop()
 				rf.currentState = follower
 			case <-rf.voteGrantedCh:
+				fmt.Printf("Execute - server:%d, current state:%d vote granted\n",
+					rf.me, rf.currentState)
 				timer.Stop()
 				rf.currentState = follower
 			}
@@ -431,6 +489,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
+	fmt.Printf("Me:%d\n", me)
 	rf.me = me
 
 	// Your initialization code here.
@@ -443,6 +502,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	go rf.Execute()
 
 	return rf
 }
@@ -462,6 +523,6 @@ const (
 
 const (
 	followerTimeoutInterval        time.Duration = 1000
-	candidateRandomTimeoutInterval time.Duration = 1000
+	candidateRandomTimeoutInterval time.Duration = 750
 	leaderTimeoutInterval          time.Duration = 500
 )
