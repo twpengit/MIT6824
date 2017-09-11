@@ -80,6 +80,12 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	term = rf.currentTerm
+	isleader = (rf.currentState == leader)
+
 	return term, isleader
 }
 
@@ -156,6 +162,16 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 				rf.votedFor = args.CandidateId
 				reply.Term = rf.currentTerm
 				reply.VoteGranted = true
+
+				for true {
+					// Clear messages in channel
+					select {
+					case <-rf.voteGrantedCh:
+					default:
+						break
+					}
+				}
+				rf.voteGrantedCh <- true
 			}
 		} else {
 			reply.Term = rf.currentTerm
@@ -171,6 +187,16 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidateId
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
+
+			for true {
+				// Clear messages in channel
+				select {
+				case <-rf.voteGrantedCh:
+				default:
+					break
+				}
+			}
+			rf.voteGrantedCh <- true
 		}
 	}
 }
@@ -215,6 +241,31 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	// Your code here.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	if args.Entries == nil {
+		// This is a heart beat from leader
+		if args.Term >= rf.currentTerm {
+			rf.currentTerm = args.Term
+			rf.currentState = follower
+			rf.votedFor = args.LeaderId
+
+			reply.Success = true
+			reply.Term = args.Term
+
+			for true {
+				// Clear messages in channel
+				select {
+				case <-rf.leaderHeartBeatCh:
+				default:
+					break
+				}
+			}
+			rf.leaderHeartBeatCh <- true
+		} else {
+			reply.Success = false
+			reply.Term = rf.currentTerm
+		}
+	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -305,6 +356,14 @@ func (rf *Raft) Execute() {
 										rf.voteCount++
 										if (rf.voteCount > len(rf.peers)/2) &&
 											((rf.voteCount - 1) < len(rf.peers)/2) {
+											for true {
+												// Clear messages in channel
+												select {
+												case <-rf.electedAsLeaderCh:
+												default:
+													break
+												}
+											}
 											rf.electedAsLeaderCh <- true
 										}
 									}
@@ -377,6 +436,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here.
 	rf.applyCh = applyCh
 	rf.currentState = follower
+
+	rf.leaderHeartBeatCh = make(chan bool, 1)
+	rf.voteGrantedCh = make(chan bool, 1)
+	rf.electedAsLeaderCh = make(chan bool, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
