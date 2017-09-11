@@ -241,6 +241,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
+	fmt.Printf("sendRequestVote - server %d, candidateid %d\n", server, args.CandidateId)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -265,6 +266,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	defer rf.mu.Unlock()
 
 	if args.Entries == nil {
+		fmt.Printf("Heart beat from %d, leader term is %d, I'm %d, my term is %d\n",
+			args.LeaderId, args.Term, rf.me, rf.currentTerm)
 		// This is a heart beat from leader
 		if args.Term >= rf.currentTerm {
 			rf.currentTerm = args.Term
@@ -380,10 +383,10 @@ func (rf *Raft) Execute() {
 							lastLogTerm}
 						voteReply := new(RequestVoteReply)
 
-						go func(args RequestVoteArgs, reply *RequestVoteReply) {
+						go func(index int, args RequestVoteArgs, reply *RequestVoteReply) {
 						RETRY:
 							for true {
-								res := rf.sendRequestVote(idx, args, reply)
+								res := rf.sendRequestVote(index, args, reply)
 								if res {
 									rf.mu.Lock()
 									fmt.Printf("1\n")
@@ -409,10 +412,12 @@ func (rf *Raft) Execute() {
 
 									rf.mu.Unlock()
 									break RETRY
+								} else {
+									fmt.Printf("res failed\n")
 								}
 							}
 
-						}(voteArgs, voteReply)
+						}(idx, voteArgs, voteReply)
 					}
 				}
 
@@ -453,9 +458,11 @@ func (rf *Raft) Execute() {
 							lastLogTerm, nil, rf.commitIndex}
 						heartBeatReply := new(AppendEntriesReply)
 
-						go func(args AppendEntriesArgs, reply *AppendEntriesReply) {
-							rf.sendAppendEntries(idx, args, reply)
-						}(heartBeatArgs, heartBeatReply)
+						go func(index int, args AppendEntriesArgs, reply *AppendEntriesReply) {
+							fmt.Printf("HB to %d, from %d, leader term %d\n", index,
+								args.LeaderId, args.Term)
+							rf.sendAppendEntries(index, args, reply)
+						}(idx, heartBeatArgs, heartBeatReply)
 					}
 				}
 			case <-rf.leaderHeartBeatCh:
