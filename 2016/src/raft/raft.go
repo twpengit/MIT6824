@@ -316,7 +316,107 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
+	rf.mu.Lock()
+
+	if rf.currentState != leader {
+		isLeader = false
+		return index, term, isLeader
+	}
+
+	// I'm the leader, append log first
+	logEntry := LogEntry{rf.currentTerm, command}
+	rf.log = append(rf.log, logEntry)
+
+	// Start distributing logs to other peers
+	replyChn := make(chan bool, 1)
+	go rf.distributeLogs(replyChn)
+
+	index = len(rf.log)
+	term = rf.currentTerm
+	isLeader = true
+
+	rf.mu.Unlock()
+
+	// Wait for reply
+	<-replyChn
+
 	return index, term, isLeader
+}
+
+// Distribute logs to each other peer
+func (rf *Raft) distributeLogs(replyChannel chan bool) {
+	// Reset commit count for this log distribution
+	commitCount := 0
+	var commitCountMutex sync.Mutex
+	dominateCommitChan := make(chan bool, 1)
+
+	for idx, _ := range rf.log {
+		if idx == rf.me {
+			// Skip sending log to myself
+			commitCountMutex.Lock()
+			commitCount++
+			if commitCount > len(rf.peers)/2 &&
+				commitCount-1 <= len(rf.peers)/2 {
+				dominateCommitChan <- true
+			}
+			commitCountMutex.Unlock()
+
+			continue
+		} else {
+			preLogIndex := 0
+			if len(rf.log) > 1 {
+				preLogIndex = len(rf.log) - 1
+			}
+			preLogTerm := 0
+			if len(rf.log) > 1 {
+				preLogTerm = rf.log[len(rf.log)-2].Term
+			}
+			appendLogArgs := AppendEntriesArgs{rf.currentTerm, rf.me, preLogIndex,
+				preLogTerm, rf.log[rf.nextIndex[idx]-1:], rf.commitIndex}
+			appendLogReply := new(AppendEntriesReply)
+
+			go func(index int, args AppendEntriesArgs, reply *AppendEntriesReply) {
+				for true {
+					res := rf.sendAppendEntries(index, args, reply)
+					if res {
+						if reply.Success {
+							commitCountMutex.Lock()
+							// Update next index and match index for this peer
+							rf.nextIndex[index] = args.PreLogIndex + len(args.Entries) + 1
+							rf.matchIndex[index] = args.PreLogIndex + len(args.Entries)
+
+							// Increase commit count
+							commitCount++
+							if commitCount > len(rf.peers)/2 &&
+								commitCount-1 <= len(rf.peers)/2 {
+								dominateCommitChan <- true
+							}
+							commitCountMutex.Unlock()
+
+							break
+						} else {
+							// Decrease next index and retry next time
+							rf.mu.Lock()
+							if rf.nextIndex[idx] == 0 {
+								rf.mu.Unlock()
+								break
+							} else {
+								rf.nextIndex[idx] = rf.nextIndex[idx] - 1
+							}
+							rf.mu.Unlock()
+						}
+					} else {
+						// Communication failed, retry next time
+						time.Sleep(1000 * time.Millisecond)
+					}
+				}
+			}(idx, appendLogArgs, appendLogReply)
+		}
+	}
+
+	// Wait commit from dominate peers
+	<-dominateCommitChan
+	replyChannel <- true
 }
 
 //
@@ -436,6 +536,16 @@ func (rf *Raft) Execute() {
 					rf.me, rf.currentState)
 				timer.Stop()
 				rf.currentState = leader
+
+				// Initial nextIndex[] and matchIndex[]
+				rf.mu.Lock()
+				for idx, _ := range rf.nextIndex {
+					rf.nextIndex[idx] = len(rf.log) + 1
+				}
+				for idx, _ := range rf.matchIndex {
+					rf.matchIndex[idx] = 0
+				}
+				rf.mu.Unlock()
 			}
 		case leader:
 			timer := time.NewTimer(time.Duration(leaderTimeoutInterval) * time.Millisecond)
@@ -449,12 +559,16 @@ func (rf *Raft) Execute() {
 					if idx == rf.me {
 						// Skip sending heart beat to myself
 					} else {
-						lastLogTerm := 0
-						if len(rf.log) > 0 {
-							lastLogTerm = rf.log[len(rf.log)-1].Term
+						preLogIndex := 0
+						if len(rf.log) > 1 {
+							preLogIndex = len(rf.log) - 1
 						}
-						heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me, len(rf.log),
-							lastLogTerm, nil, rf.commitIndex}
+						preLogTerm := 0
+						if len(rf.log) > 1 {
+							preLogTerm = rf.log[len(rf.log)-2].Term
+						}
+						heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me, preLogIndex,
+							preLogTerm, nil, rf.commitIndex}
 						heartBeatReply := new(AppendEntriesReply)
 
 						go func(index int, args AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -513,8 +627,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 type LogEntry struct {
-	Command interface{}
 	Term    int
+	Command interface{}
 }
 
 type serverState int
