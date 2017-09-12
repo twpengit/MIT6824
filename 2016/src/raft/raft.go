@@ -63,7 +63,7 @@ type Raft struct {
 	// Persistent state on all servers:
 	currentTerm int
 	votedFor    int
-	log         []logEntry
+	log         []LogEntry
 
 	// Volatile state on all servers:
 	commitIndex int
@@ -159,7 +159,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 			lastLogTerm := 0
 			if len(rf.log) > 0 {
-				lastLogTerm = rf.log[len(rf.log)-1].term
+				lastLogTerm = rf.log[len(rf.log)-1].Term
 			}
 
 			if args.LastLogTerm < lastLogTerm {
@@ -193,7 +193,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		lastLogTerm := 0
 		if len(rf.log) > 0 {
-			lastLogTerm = rf.log[len(rf.log)-1].term
+			lastLogTerm = rf.log[len(rf.log)-1].Term
 		}
 
 		if args.LastLogTerm < lastLogTerm {
@@ -241,7 +241,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
-	fmt.Printf("sendRequestVote - server %d, candidateid %d\n", server, args.CandidateId)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -251,7 +250,7 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PreLogIndex  int
 	PreLogTerm   int
-	Entries      []logEntry
+	Entries      []LogEntry
 	LeaderCommit int
 }
 
@@ -377,7 +376,7 @@ func (rf *Raft) Execute() {
 					} else {
 						lastLogTerm := 0
 						if len(rf.log) > 0 {
-							lastLogTerm = rf.log[len(rf.log)-1].term
+							lastLogTerm = rf.log[len(rf.log)-1].Term
 						}
 						voteArgs := RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log),
 							lastLogTerm}
@@ -443,7 +442,7 @@ func (rf *Raft) Execute() {
 
 			select {
 			case <-timer.C:
-				fmt.Printf("Execute - server:%d, current state:%d send HB\n",
+				fmt.Printf("Execute - server:%d, current state:%d send HB to peers\n",
 					rf.me, rf.currentState)
 				timer.Stop()
 				for idx, _ := range rf.peers {
@@ -452,15 +451,13 @@ func (rf *Raft) Execute() {
 					} else {
 						lastLogTerm := 0
 						if len(rf.log) > 0 {
-							lastLogTerm = rf.log[len(rf.log)-1].term
+							lastLogTerm = rf.log[len(rf.log)-1].Term
 						}
 						heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me, len(rf.log),
 							lastLogTerm, nil, rf.commitIndex}
 						heartBeatReply := new(AppendEntriesReply)
 
 						go func(index int, args AppendEntriesArgs, reply *AppendEntriesReply) {
-							fmt.Printf("HB to %d, from %d, leader term %d\n", index,
-								args.LeaderId, args.Term)
 							rf.sendAppendEntries(index, args, reply)
 						}(idx, heartBeatArgs, heartBeatReply)
 					}
@@ -515,9 +512,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-type logEntry struct {
-	command interface{}
-	term    int
+type LogEntry struct {
+	Command interface{}
+	Term    int
 }
 
 type serverState int
