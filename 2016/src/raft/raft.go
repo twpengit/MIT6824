@@ -19,6 +19,7 @@ package raft
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -290,6 +291,41 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			reply.Success = false
 			reply.Term = rf.currentTerm
 		}
+	} else {
+		// Set default reply
+		reply.Success = false
+		reply.Term = rf.currentTerm
+
+		// Reply false if term < currentTerm (§5.1)
+		if rf.currentTerm > args.Term {
+			// Keep default reply
+			return
+		}
+
+		// Reply false if log doesn’t contain an entry at prevLogIndex
+		// whose term matches prevLogTerm (§5.3)
+		if len(rf.log) < args.PreLogIndex {
+			// Keep default reply
+			return
+		}
+		if len(rf.log) > 0 && rf.log[args.PreLogIndex-1].Term != args.PreLogTerm {
+			// Keep default reply, remove unmatched logs
+			rf.log = rf.log[0 : args.PreLogIndex-1]
+			return
+		}
+
+		// Append any new entries not already in the log
+		rf.log = append(rf.log, args.Entries...)
+
+		// If leaderCommit > commitIndex, set commitIndex =
+		// min(leaderCommit, index of last new entry)
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = int(math.Min(float64(args.LeaderCommit),
+				float64(len(rf.log))))
+		}
+
+		reply.Success = true
+		reply.Term = rf.currentTerm
 	}
 }
 
@@ -340,6 +376,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Wait for reply
 	<-replyChn
 
+	rf.mu.Lock()
+	rf.commitIndex++
+	rf.mu.Unlock()
+
 	return index, term, isLeader
 }
 
@@ -382,8 +422,10 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 						if reply.Success {
 							commitCountMutex.Lock()
 							// Update next index and match index for this peer
+							rf.mu.Lock()
 							rf.nextIndex[index] = args.PreLogIndex + len(args.Entries) + 1
 							rf.matchIndex[index] = args.PreLogIndex + len(args.Entries)
+							rf.mu.Unlock()
 
 							// Increase commit count
 							commitCount++
@@ -419,6 +461,11 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 	replyChannel <- true
 }
 
+// Apply logs to their local service replica
+func (rf *Raft) applyLogs() {
+
+}
+
 //
 // the tester calls Kill() when a Raft instance won't
 // be needed again. you are not required to do anything
@@ -429,7 +476,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
-func (rf *Raft) Execute() {
+func (rf *Raft) execute() {
 	for true {
 		switch rf.currentState {
 		case follower:
@@ -621,7 +668,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	go rf.Execute()
+	go rf.execute()
+	go rf.applyLogs()
 
 	return rf
 }
