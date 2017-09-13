@@ -58,6 +58,7 @@ type Raft struct {
 	leaderHeartBeatCh chan bool
 	voteGrantedCh     chan bool
 	electedAsLeaderCh chan bool
+	commitCh          chan bool
 	voteCount         int
 	currentState      serverState
 
@@ -376,10 +377,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Wait for reply
 	<-replyChn
 
-	rf.mu.Lock()
-	rf.commitIndex++
-	rf.mu.Unlock()
-
 	return index, term, isLeader
 }
 
@@ -388,7 +385,7 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 	// Reset commit count for this log distribution
 	commitCount := 0
 	var commitCountMutex sync.Mutex
-	dominateCommitChan := make(chan bool, 1)
+	dominateCommitChan := make(chan bool, len(rf.peers))
 
 	for idx, _ := range rf.log {
 		if idx == rf.me {
@@ -463,7 +460,26 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 
 // Apply logs to their local service replica
 func (rf *Raft) applyLogs() {
+	for true {
+		timer := time.NewTimer(applyLogTimeoutInterval * time.Millisecond)
 
+		select {
+		case <-rf.commitCh:
+		// Be notified new log commited
+
+		case <-timer.C:
+			// If I am leader, I will try to commit and apply logs
+			timer.Stop()
+
+			rf.mu.Lock()
+			if rf.currentState == leader {
+				for index := rf.commitIndex; index < len(rf.log); index++ {
+
+				}
+			}
+			rf.mu.Unlock()
+		}
+	}
 }
 
 //
@@ -664,6 +680,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.leaderHeartBeatCh = make(chan bool, 1)
 	rf.voteGrantedCh = make(chan bool, 1)
 	rf.electedAsLeaderCh = make(chan bool, 1)
+	rf.commitCh = make(chan bool, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -691,4 +708,5 @@ const (
 	followerTimeoutInterval        time.Duration = 1000
 	candidateRandomTimeoutInterval time.Duration = 750
 	leaderTimeoutInterval          time.Duration = 500
+	applyLogTimeoutInterval        time.Duration = 1000
 )
