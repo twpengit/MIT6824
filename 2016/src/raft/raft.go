@@ -58,7 +58,7 @@ type Raft struct {
 	leaderHeartBeatCh chan bool
 	voteGrantedCh     chan bool
 	electedAsLeaderCh chan bool
-	commitCh          chan bool
+	commitCh          chan int
 	voteCount         int
 	currentState      serverState
 
@@ -288,6 +288,25 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				}
 			}
 			rf.leaderHeartBeatCh <- true
+
+			// leaderCommit > commitIndex, set commitIndex =
+			// min(leaderCommit, index of last new entry)
+			if args.LeaderCommit > rf.commitIndex {
+				lastCommitIndex := rf.commitIndex
+				rf.commitIndex = int(math.Min(float64(args.LeaderCommit),
+					float64(len(rf.log))))
+
+				for true {
+					// Clear messages in channel
+					select {
+					case <-rf.commitCh:
+					default:
+						break
+					}
+				}
+
+				rf.commitCh <- lastCommitIndex
+			}
 		} else {
 			reply.Success = false
 			reply.Term = rf.currentTerm
@@ -459,13 +478,21 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 }
 
 // Apply logs to their local service replica
-func (rf *Raft) applyLogs() {
+func (rf *Raft) commitLogs() {
 	for true {
 		timer := time.NewTimer(applyLogTimeoutInterval * time.Millisecond)
 
 		select {
-		case <-rf.commitCh:
-		// Be notified new log commited
+		case lastCommitIndex := <-rf.commitCh:
+			// Be notified new log commited
+			timer.Stop()
+
+			rf.mu.Lock()
+			for index := lastCommitIndex; index < rf.commitIndex; index++ {
+				rf.applyCh <- ApplyMsg{index + 1,
+					rf.log[index].Command, false, nil}
+			}
+			rf.mu.Unlock()
 
 		case <-timer.C:
 			// If I am leader, I will try to commit and apply logs
@@ -473,8 +500,22 @@ func (rf *Raft) applyLogs() {
 
 			rf.mu.Lock()
 			if rf.currentState == leader {
-				for index := rf.commitIndex; index < len(rf.log); index++ {
+				for index := rf.commitIndex + 1; index < len(rf.log); index++ {
+					commitCount := 0
+					for idx, matchedIndex := range rf.matchIndex {
+						if matchedIndex >= index || idx == rf.me {
+							commitCount++
+						}
+					}
 
+					if commitCount > len(rf.peers)/2 {
+						rf.commitIndex++
+						rf.applyCh <- ApplyMsg{rf.commitIndex,
+							rf.log[rf.commitIndex-1].Command, false, nil}
+						rf.lastApplied++
+					} else {
+						break
+					}
 				}
 			}
 			rf.mu.Unlock()
@@ -680,13 +721,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.leaderHeartBeatCh = make(chan bool, 1)
 	rf.voteGrantedCh = make(chan bool, 1)
 	rf.electedAsLeaderCh = make(chan bool, 1)
-	rf.commitCh = make(chan bool, 1)
+	rf.commitCh = make(chan int, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	go rf.execute()
-	go rf.applyLogs()
+	go rf.commitLogs()
 
 	return rf
 }
