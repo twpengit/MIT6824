@@ -58,7 +58,6 @@ type Raft struct {
 	leaderHeartBeatCh chan bool
 	voteGrantedCh     chan bool
 	electedAsLeaderCh chan bool
-	commitCh          chan int
 	voteCount         int
 	currentState      serverState
 
@@ -293,21 +292,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			// min(leaderCommit, index of last new entry)
 			if args.LeaderCommit > rf.commitIndex {
 				fmt.Printf("*z, leader commit %d, my commit%d\n", args.LeaderCommit, rf.commitIndex)
-				lastCommitIndex := rf.commitIndex
 				rf.commitIndex = int(math.Min(float64(args.LeaderCommit),
 					float64(len(rf.log))))
 
-				for true {
-					// Clear messages in channel
-					select {
-					case <-rf.commitCh:
-					default:
-						break
-					}
-					break
-				}
 				fmt.Println("*zz")
-				rf.commitCh <- lastCommitIndex
 			}
 		} else {
 			reply.Success = false
@@ -408,6 +396,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Wait for reply
 	<-replyChn
 	fmt.Println("*xxxx")
+
+	// Wait for log to be applied
+	for true {
+		timer := time.NewTimer(applyLogTimeoutInterval * time.Millisecond)
+
+		select {
+		case <-timer.C:
+			// If I am leader, I will try to commit and apply logs
+			timer.Stop()
+
+			rf.mu.Lock()
+			if rf.lastApplied >= index {
+				break
+			}
+			rf.mu.Unlock()
+		}
+
+		break
+	}
+
 	return index, term, isLeader
 }
 
@@ -499,25 +507,12 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 	replyChannel <- true
 }
 
-// Apply logs to their local service replica
+// Commit logs
 func (rf *Raft) commitLogs() {
 	for true {
-		timer := time.NewTimer(applyLogTimeoutInterval * time.Millisecond)
+		timer := time.NewTimer(commitLogTimeoutInterval * time.Millisecond)
 
 		select {
-		case lastCommitIndex := <-rf.commitCh:
-			// Be notified new log commited
-			timer.Stop()
-
-			rf.mu.Lock()
-			for index := lastCommitIndex; index < rf.commitIndex; index++ {
-				rf.applyCh <- ApplyMsg{index + 1,
-					rf.log[index].Command, false, nil}
-				fmt.Printf("*y index %d, command %d\n", index+1,
-					rf.log[index].Command.(int))
-			}
-			rf.mu.Unlock()
-
 		case <-timer.C:
 			// If I am leader, I will try to commit and apply logs
 			timer.Stop()
@@ -534,15 +529,35 @@ func (rf *Raft) commitLogs() {
 
 					if commitCount > len(rf.peers)/2 {
 						rf.commitIndex++
-						rf.applyCh <- ApplyMsg{rf.commitIndex,
-							rf.log[rf.commitIndex-1].Command, false, nil}
-						rf.lastApplied++
 						fmt.Printf("*yy index %d, command %d\n",
 							rf.commitIndex, rf.log[rf.commitIndex-1].Command.(int))
 					} else {
 						break
 					}
 				}
+			}
+			rf.mu.Unlock()
+		}
+	}
+}
+
+// Apply logs to their local service replica
+func (rf *Raft) applyLogs() {
+	for true {
+		timer := time.NewTimer(applyLogTimeoutInterval * time.Millisecond)
+
+		select {
+		case <-timer.C:
+			timer.Stop()
+
+			rf.mu.Lock()
+			for index := rf.lastApplied; index < rf.commitIndex; index++ {
+				if rf.lastApplied == rf.commitIndex {
+					break
+				}
+
+				rf.applyCh <- ApplyMsg{index + 1, rf.log[index].Command, false, nil}
+				rf.lastApplied++
 			}
 			rf.mu.Unlock()
 		}
@@ -752,13 +767,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.leaderHeartBeatCh = make(chan bool, 1)
 	rf.voteGrantedCh = make(chan bool, 1)
 	rf.electedAsLeaderCh = make(chan bool, 1)
-	rf.commitCh = make(chan int, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	go rf.execute()
 	go rf.commitLogs()
+	go rf.applyLogs()
 
 	return rf
 }
@@ -779,6 +794,7 @@ const (
 const (
 	followerTimeoutInterval        time.Duration = 1000
 	candidateRandomTimeoutInterval time.Duration = 750
-	leaderTimeoutInterval          time.Duration = 500
-	applyLogTimeoutInterval        time.Duration = 1000
+	leaderTimeoutInterval          time.Duration = 100
+	commitLogTimeoutInterval       time.Duration = 300
+	applyLogTimeoutInterval        time.Duration = 300
 )
