@@ -292,6 +292,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			// leaderCommit > commitIndex, set commitIndex =
 			// min(leaderCommit, index of last new entry)
 			if args.LeaderCommit > rf.commitIndex {
+				fmt.Printf("*z, leader commit %d, my commit%d\n", args.LeaderCommit, rf.commitIndex)
 				lastCommitIndex := rf.commitIndex
 				rf.commitIndex = int(math.Min(float64(args.LeaderCommit),
 					float64(len(rf.log))))
@@ -303,8 +304,9 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 					default:
 						break
 					}
+					break
 				}
-
+				fmt.Println("*zz")
 				rf.commitCh <- lastCommitIndex
 			}
 		} else {
@@ -318,6 +320,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 		// Reply false if term < currentTerm (§5.1)
 		if rf.currentTerm > args.Term {
+			fmt.Println("*")
 			// Keep default reply
 			return
 		}
@@ -325,15 +328,17 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		// Reply false if log doesn’t contain an entry at prevLogIndex
 		// whose term matches prevLogTerm (§5.3)
 		if len(rf.log) < args.PreLogIndex {
+			fmt.Println("**")
 			// Keep default reply
 			return
 		}
 		if len(rf.log) > 0 && rf.log[args.PreLogIndex-1].Term != args.PreLogTerm {
+			fmt.Println("***")
 			// Keep default reply, remove unmatched logs
 			rf.log = rf.log[0 : args.PreLogIndex-1]
 			return
 		}
-
+		fmt.Println("****")
 		// Append any new entries not already in the log
 		rf.log = append(rf.log, args.Entries...)
 
@@ -346,6 +351,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 		reply.Success = true
 		reply.Term = rf.currentTerm
+		fmt.Println("*****")
 	}
 }
 
@@ -368,6 +374,11 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	v, ok := command.(int)
+	if ok {
+		fmt.Printf("***command %d\n", v)
+	}
+
 	index := -1
 	term := -1
 	isLeader := true
@@ -376,6 +387,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	if rf.currentState != leader {
 		isLeader = false
+		rf.mu.Unlock()
 		return index, term, isLeader
 	}
 
@@ -395,7 +407,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Wait for reply
 	<-replyChn
-
+	fmt.Println("*xxxx")
 	return index, term, isLeader
 }
 
@@ -406,11 +418,14 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 	var commitCountMutex sync.Mutex
 	dominateCommitChan := make(chan bool, len(rf.peers))
 
-	for idx, _ := range rf.log {
+	for idx, _ := range rf.peers {
 		if idx == rf.me {
 			// Skip sending log to myself
 			commitCountMutex.Lock()
 			commitCount++
+
+			fmt.Printf("Commit count for myself is %d\n", commitCount)
+
 			if commitCount > len(rf.peers)/2 &&
 				commitCount-1 <= len(rf.peers)/2 {
 				dominateCommitChan <- true
@@ -427,6 +442,7 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 			if len(rf.log) > 1 {
 				preLogTerm = rf.log[len(rf.log)-2].Term
 			}
+
 			appendLogArgs := AppendEntriesArgs{rf.currentTerm, rf.me, preLogIndex,
 				preLogTerm, rf.log[rf.nextIndex[idx]-1:], rf.commitIndex}
 			appendLogReply := new(AppendEntriesReply)
@@ -436,7 +452,9 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 					res := rf.sendAppendEntries(index, args, reply)
 					if res {
 						if reply.Success {
+							fmt.Println("*x")
 							commitCountMutex.Lock()
+							fmt.Println("*xx")
 							// Update next index and match index for this peer
 							rf.mu.Lock()
 							rf.nextIndex[index] = args.PreLogIndex + len(args.Entries) + 1
@@ -445,9 +463,13 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 
 							// Increase commit count
 							commitCount++
+
+							fmt.Printf("Commit count for server %d is %d\n", index, commitCount)
+
 							if commitCount > len(rf.peers)/2 &&
 								commitCount-1 <= len(rf.peers)/2 {
 								dominateCommitChan <- true
+								fmt.Println("*xxx")
 							}
 							commitCountMutex.Unlock()
 
@@ -491,6 +513,8 @@ func (rf *Raft) commitLogs() {
 			for index := lastCommitIndex; index < rf.commitIndex; index++ {
 				rf.applyCh <- ApplyMsg{index + 1,
 					rf.log[index].Command, false, nil}
+				fmt.Printf("*y index %d, command %d\n", index+1,
+					rf.log[index].Command.(int))
 			}
 			rf.mu.Unlock()
 
@@ -513,6 +537,8 @@ func (rf *Raft) commitLogs() {
 						rf.applyCh <- ApplyMsg{rf.commitIndex,
 							rf.log[rf.commitIndex-1].Command, false, nil}
 						rf.lastApplied++
+						fmt.Printf("*yy index %d, command %d\n",
+							rf.commitIndex, rf.log[rf.commitIndex-1].Command.(int))
 					} else {
 						break
 					}
@@ -569,6 +595,7 @@ func (rf *Raft) execute() {
 				fmt.Printf("Execute - server:%d, current state:%d wait %d timeout\n",
 					rf.me, rf.currentState, timeout)
 				timer.Stop()
+
 				rf.mu.Lock()
 				rf.voteCount = 0
 				rf.votedFor = rf.me
@@ -717,6 +744,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here.
 	rf.applyCh = applyCh
 	rf.currentState = follower
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex = append(rf.nextIndex, 0)
+		rf.matchIndex = append(rf.matchIndex, 0)
+	}
 
 	rf.leaderHeartBeatCh = make(chan bool, 1)
 	rf.voteGrantedCh = make(chan bool, 1)
