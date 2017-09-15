@@ -291,11 +291,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			// leaderCommit > commitIndex, set commitIndex =
 			// min(leaderCommit, index of last new entry)
 			if args.LeaderCommit > rf.commitIndex {
-				fmt.Printf("*z, leader commit %d, my commit%d\n", args.LeaderCommit, rf.commitIndex)
 				rf.commitIndex = int(math.Min(float64(args.LeaderCommit),
 					float64(len(rf.log))))
-
-				fmt.Println("*zz")
 			}
 		} else {
 			reply.Success = false
@@ -308,7 +305,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 		// Reply false if term < currentTerm (§5.1)
 		if rf.currentTerm > args.Term {
-			fmt.Println("*")
 			// Keep default reply
 			return
 		}
@@ -316,17 +312,14 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		// Reply false if log doesn’t contain an entry at prevLogIndex
 		// whose term matches prevLogTerm (§5.3)
 		if len(rf.log) < args.PreLogIndex {
-			fmt.Println("**")
 			// Keep default reply
 			return
 		}
 		if len(rf.log) > 0 && rf.log[args.PreLogIndex-1].Term != args.PreLogTerm {
-			fmt.Println("***")
 			// Keep default reply, remove unmatched logs
 			rf.log = rf.log[0 : args.PreLogIndex-1]
 			return
 		}
-		fmt.Println("****")
 		// Append any new entries not already in the log
 		rf.log = append(rf.log, args.Entries...)
 
@@ -339,7 +332,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 		reply.Success = true
 		reply.Term = rf.currentTerm
-		fmt.Println("*****")
 	}
 }
 
@@ -362,11 +354,6 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	v, ok := command.(int)
-	if ok {
-		fmt.Printf("***command %d\n", v)
-	}
-
 	index := -1
 	term := -1
 	isLeader := true
@@ -395,9 +382,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Wait for reply
 	<-replyChn
-	fmt.Println("*xxxx")
 
 	// Wait for log to be applied
+RETURN:
 	for true {
 		timer := time.NewTimer(applyLogTimeoutInterval * time.Millisecond)
 
@@ -408,12 +395,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 			rf.mu.Lock()
 			if rf.lastApplied >= index {
-				break
+				rf.mu.Unlock()
+				break RETURN
 			}
 			rf.mu.Unlock()
 		}
-
-		break
 	}
 
 	return index, term, isLeader
@@ -460,9 +446,7 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 					res := rf.sendAppendEntries(index, args, reply)
 					if res {
 						if reply.Success {
-							fmt.Println("*x")
 							commitCountMutex.Lock()
-							fmt.Println("*xx")
 							// Update next index and match index for this peer
 							rf.mu.Lock()
 							rf.nextIndex[index] = args.PreLogIndex + len(args.Entries) + 1
@@ -477,7 +461,6 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 							if commitCount > len(rf.peers)/2 &&
 								commitCount-1 <= len(rf.peers)/2 {
 								dominateCommitChan <- true
-								fmt.Println("*xxx")
 							}
 							commitCountMutex.Unlock()
 
@@ -514,12 +497,12 @@ func (rf *Raft) commitLogs() {
 
 		select {
 		case <-timer.C:
-			// If I am leader, I will try to commit and apply logs
+			// If I am leader, I will try to commit logs
 			timer.Stop()
 
 			rf.mu.Lock()
 			if rf.currentState == leader {
-				for index := rf.commitIndex + 1; index < len(rf.log); index++ {
+				for index := rf.commitIndex + 1; index <= len(rf.log); index++ {
 					commitCount := 0
 					for idx, matchedIndex := range rf.matchIndex {
 						if matchedIndex >= index || idx == rf.me {
@@ -529,8 +512,6 @@ func (rf *Raft) commitLogs() {
 
 					if commitCount > len(rf.peers)/2 {
 						rf.commitIndex++
-						fmt.Printf("*yy index %d, command %d\n",
-							rf.commitIndex, rf.log[rf.commitIndex-1].Command.(int))
 					} else {
 						break
 					}
@@ -552,10 +533,6 @@ func (rf *Raft) applyLogs() {
 
 			rf.mu.Lock()
 			for index := rf.lastApplied; index < rf.commitIndex; index++ {
-				if rf.lastApplied == rf.commitIndex {
-					break
-				}
-
 				rf.applyCh <- ApplyMsg{index + 1, rf.log[index].Command, false, nil}
 				rf.lastApplied++
 			}
