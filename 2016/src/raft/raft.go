@@ -269,35 +269,35 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		fmt.Printf("Heart beat from %d, leader term is %d, I'm %d, my term is %d\n",
 			args.LeaderId, args.Term, rf.me, rf.currentTerm)
 		// This is a heart beat from leader
-		if args.Term >= rf.currentTerm {
-			rf.currentTerm = args.Term
-			rf.currentState = follower
-			rf.votedFor = args.LeaderId
+		//		if args.Term >= rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.currentState = follower
+		rf.votedFor = args.LeaderId
 
-			reply.Success = true
-			reply.Term = args.Term
+		reply.Success = true
+		reply.Term = args.Term
 
-		CLEAN:
-			for true {
-				// Clear messages in channel
-				select {
-				case <-rf.leaderHeartBeatCh:
-				default:
-					break CLEAN
-				}
+	CLEAN:
+		for true {
+			// Clear messages in channel
+			select {
+			case <-rf.leaderHeartBeatCh:
+			default:
+				break CLEAN
 			}
-			rf.leaderHeartBeatCh <- true
-
-			// leaderCommit > commitIndex, set commitIndex =
-			// min(leaderCommit, index of last new entry)
-			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = int(math.Min(float64(args.LeaderCommit),
-					float64(len(rf.log))))
-			}
-		} else {
-			reply.Success = false
-			reply.Term = rf.currentTerm
 		}
+		rf.leaderHeartBeatCh <- true
+
+		// leaderCommit > commitIndex, set commitIndex =
+		// min(leaderCommit, index of last new entry)
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = int(math.Min(float64(args.LeaderCommit),
+				float64(len(rf.log))))
+		}
+		//		} else {
+		//			reply.Success = false
+		//			reply.Term = rf.currentTerm
+		//		}
 	} else {
 		// Set default reply
 		reply.Success = false
@@ -315,7 +315,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			// Keep default reply
 			return
 		}
-		if len(rf.log) > 0 && rf.log[args.PreLogIndex-1].Term != args.PreLogTerm {
+		if len(rf.log) > 0 && args.PreLogIndex > 0 &&
+			rf.log[args.PreLogIndex-1].Term != args.PreLogTerm {
 			// Keep default reply, remove unmatched logs
 			rf.log = rf.log[0 : args.PreLogIndex-1]
 			return
@@ -429,58 +430,57 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 			continue
 		} else {
 			preLogIndex := 0
-			if len(rf.log) > 1 {
-				preLogIndex = len(rf.log) - 1
+			if rf.nextIndex[idx] > 1 {
+				preLogIndex = rf.nextIndex[idx] - 1
 			}
 			preLogTerm := 0
-			if len(rf.log) > 1 {
-				preLogTerm = rf.log[len(rf.log)-2].Term
+			if preLogIndex > 0 {
+				preLogTerm = rf.log[preLogIndex-1].Term
 			}
-
 			appendLogArgs := AppendEntriesArgs{rf.currentTerm, rf.me, preLogIndex,
 				preLogTerm, rf.log[rf.nextIndex[idx]-1:], rf.commitIndex}
 			appendLogReply := new(AppendEntriesReply)
 
 			go func(index int, args AppendEntriesArgs, reply *AppendEntriesReply) {
-				for true {
-					res := rf.sendAppendEntries(index, args, reply)
-					if res {
-						if reply.Success {
-							commitCountMutex.Lock()
-							// Update next index and match index for this peer
-							rf.mu.Lock()
-							rf.nextIndex[index] = args.PreLogIndex + len(args.Entries) + 1
-							rf.matchIndex[index] = args.PreLogIndex + len(args.Entries)
-							rf.mu.Unlock()
+				//				for true {
+				res := rf.sendAppendEntries(index, args, reply)
+				if res {
+					if reply.Success {
+						commitCountMutex.Lock()
+						// Update next index and match index for this peer
+						rf.mu.Lock()
+						rf.nextIndex[index] = args.PreLogIndex + len(args.Entries) + 1
+						rf.matchIndex[index] = args.PreLogIndex + len(args.Entries)
+						rf.mu.Unlock()
 
-							// Increase commit count
-							commitCount++
+						// Increase commit count
+						commitCount++
 
-							fmt.Printf("Commit count for server %d is %d\n", index, commitCount)
+						fmt.Printf("Commit count for server %d is %d\n", index, commitCount)
 
-							if commitCount > len(rf.peers)/2 &&
-								commitCount-1 <= len(rf.peers)/2 {
-								dominateCommitChan <- true
-							}
-							commitCountMutex.Unlock()
-
-							break
-						} else {
-							// Decrease next index and retry next time
-							rf.mu.Lock()
-							if rf.nextIndex[idx] == 0 {
-								rf.mu.Unlock()
-								break
-							} else {
-								rf.nextIndex[idx] = rf.nextIndex[idx] - 1
-							}
-							rf.mu.Unlock()
+						if commitCount > len(rf.peers)/2 &&
+							commitCount-1 <= len(rf.peers)/2 {
+							dominateCommitChan <- true
 						}
+						commitCountMutex.Unlock()
+
+						//						break
 					} else {
-						// Communication failed, retry next time
-						time.Sleep(1000 * time.Millisecond)
+						// Decrease next index and retry next time
+						rf.mu.Lock()
+						if rf.nextIndex[idx] == 1 {
+							//							rf.mu.Unlock()
+							//							break
+						} else {
+							rf.nextIndex[idx] = rf.nextIndex[idx] - 1
+						}
+						rf.mu.Unlock()
 					}
+				} else {
+					// Communication failed, retry next time
+					time.Sleep(1000 * time.Millisecond)
 				}
+				//				}
 			}(idx, appendLogArgs, appendLogReply)
 		}
 	}
@@ -533,6 +533,8 @@ func (rf *Raft) applyLogs() {
 
 			rf.mu.Lock()
 			for index := rf.lastApplied; index < rf.commitIndex; index++ {
+				fmt.Printf("*applyLogs, server %d, index %d, command %d\n",
+					rf.me, index+1, rf.log[index].Command)
 				rf.applyCh <- ApplyMsg{index + 1, rf.log[index].Command, false, nil}
 				rf.lastApplied++
 			}
