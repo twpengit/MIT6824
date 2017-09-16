@@ -321,8 +321,19 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			rf.log = rf.log[0 : args.PreLogIndex-1]
 			return
 		}
+
+		fmt.Printf("*applyLogs, server %d log before append...\n", rf.me)
+		for idx, command := range rf.log {
+			fmt.Printf("server:%d, idx:%d, command:%d\n", rf.me, idx, command.Command.(int))
+		}
+
 		// Append any new entries not already in the log
 		rf.log = append(rf.log, args.Entries...)
+
+		fmt.Printf("*applyLogs, server %d log after append...\n", rf.me)
+		for idx, command := range rf.log {
+			fmt.Printf("server:%d, idx:%d, command:%d\n", rf.me, idx, command.Command.(int))
+		}
 
 		// If leaderCommit > commitIndex, set commitIndex =
 		// min(leaderCommit, index of last new entry)
@@ -355,6 +366,8 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	fmt.Printf("*applyLogs Start, server %d, commitIndex %d, lastApplied %d, command %d\n",
+		rf.me, rf.commitIndex, rf.lastApplied, command.(int))
 	index := -1
 	term := -1
 	isLeader := true
@@ -362,14 +375,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 
 	if rf.currentState != leader {
+		fmt.Printf("*applyLogs Start false, server %d, commitIndex %d, lastApplied %d, command %d\n",
+			rf.me, rf.commitIndex, rf.lastApplied, command.(int))
 		isLeader = false
 		rf.mu.Unlock()
 		return index, term, isLeader
 	}
 
+	fmt.Printf("*applyLogs, leader %d log before append...\n", rf.me)
+	for idx, command := range rf.log {
+		fmt.Printf("server:%d, idx:%d, command:%d\n", rf.me, idx, command.Command.(int))
+	}
+
 	// I'm the leader, append log first
 	logEntry := LogEntry{rf.currentTerm, command}
 	rf.log = append(rf.log, logEntry)
+
+	fmt.Printf("*applyLogs, leader %d log after append...\n", rf.me)
+	for idx, command := range rf.log {
+		fmt.Printf("server:%d, idx:%d, command:%d\n", rf.me, idx, command.Command.(int))
+	}
 
 	// Start distributing logs to other peers
 	replyChn := make(chan bool, 1)
