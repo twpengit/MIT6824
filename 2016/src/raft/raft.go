@@ -408,27 +408,27 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.mu.Unlock()
 
-	// Wait for reply
-	<-replyChn
+	//	// Wait for reply
+	//	<-replyChn
 
-	// Wait for log to be applied
-RETURN:
-	for true {
-		timer := time.NewTimer(applyLogTimeoutInterval * time.Millisecond)
+	//	// Wait for log to be applied
+	//RETURN:
+	//	for true {
+	//		timer := time.NewTimer(applyLogTimeoutInterval * time.Millisecond)
 
-		select {
-		case <-timer.C:
-			// If I am leader, I will try to commit and apply logs
-			timer.Stop()
+	//		select {
+	//		case <-timer.C:
+	//			// If I am leader, I will try to commit and apply logs
+	//			timer.Stop()
 
-			rf.mu.Lock()
-			if rf.lastApplied >= index {
-				rf.mu.Unlock()
-				break RETURN
-			}
-			rf.mu.Unlock()
-		}
-	}
+	//			rf.mu.Lock()
+	//			if rf.lastApplied >= index {
+	//				rf.mu.Unlock()
+	//				break RETURN
+	//			}
+	//			rf.mu.Unlock()
+	//		}
+	//	}
 
 	return index, term, isLeader
 }
