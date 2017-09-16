@@ -125,7 +125,6 @@ func TestFailAgree(t *testing.T) {
 	// agree with full set of servers?
 	cfg.one(106, servers)
 	time.Sleep(RaftElectionTimeout)
-	fmt.Printf("*applyLogs, Final test\n")
 	cfg.one(107, servers)
 	fmt.Printf("  ... Passed\n")
 }

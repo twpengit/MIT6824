@@ -328,6 +328,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		}
 
 		// Append any new entries not already in the log
+		if args.PreLogIndex == 0 {
+			// If prelogindex is zero, clear all the log items first
+			rf.log = rf.log[:0]
+		}
 		rf.log = append(rf.log, args.Entries...)
 
 		fmt.Printf("*applyLogs, server %d log after append...\n", rf.me)
@@ -375,8 +379,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 
 	if rf.currentState != leader {
-		fmt.Printf("*applyLogs Start false, server %d, commitIndex %d, lastApplied %d, command %d\n",
-			rf.me, rf.commitIndex, rf.lastApplied, command.(int))
 		isLeader = false
 		rf.mu.Unlock()
 		return index, term, isLeader
@@ -462,8 +464,9 @@ func (rf *Raft) distributeLogs(replyChannel chan bool) {
 			if preLogIndex > 0 {
 				preLogTerm = rf.log[preLogIndex-1].Term
 			}
+			fmt.Printf("*applyLogs, distribute logs server:%d, preLogIndex:%d\n", idx, preLogIndex)
 			appendLogArgs := AppendEntriesArgs{rf.currentTerm, rf.me, preLogIndex,
-				preLogTerm, rf.log[rf.nextIndex[idx]-1:], rf.commitIndex}
+				preLogTerm, rf.log[preLogIndex:], rf.commitIndex}
 			appendLogReply := new(AppendEntriesReply)
 
 			go func(index int, args AppendEntriesArgs, reply *AppendEntriesReply) {
