@@ -337,7 +337,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 		rf.log = append(rf.log, args.Entries...)
 
-		fmt.Printf("*applyLogs, server %d log after append...\n", rf.me)
+		fmt.Printf("*applyLogs, server %d log after append....\n", rf.me)
 		for idx, command := range rf.log {
 			fmt.Printf("server:%d, idx:%d, command:%d\n", rf.me, idx, command.Command.(int))
 		}
