@@ -331,7 +331,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		if args.PreLogIndex == 0 {
 			// If prelogindex is zero, clear all the log items first
 			rf.log = rf.log[:0]
+		} else {
+			rf.log = rf.log[0:args.PreLogIndex]
 		}
+
 		rf.log = append(rf.log, args.Entries...)
 
 		fmt.Printf("*applyLogs, server %d log after append...\n", rf.me)
